@@ -16,6 +16,30 @@ client = get_client()
 batch_id = st.session_state.get("batch_id")
 run_id = st.session_state.get("run_id")
 
+
+def _fetch_final_results(
+    weights: dict[str, float] | None = None,
+    mode: str = "top_n",
+    top_n: int = 10,
+    threshold: float = 60.0,
+) -> None:
+    """Fetch the final ranked table for ``run_id`` and cache it for display.
+
+    ``weights=None`` uses the backend's default weights - the same ones
+    POST /results/upload already computed and persisted, so calling this
+    right after a successful upload just reads back that result rather than
+    producing a new one.
+    """
+    try:
+        final = client.final_shortlist(
+            run_id, weights=weights, mode=mode, top_n=top_n, threshold=threshold
+        )
+    except ApiError as exc:
+        st.error(f"Could not load final scores: {exc}")
+    else:
+        st.session_state["_final_results"] = final
+
+
 if not batch_id:
     st.info("Upload a candidate file first (page 1).")
     st.stop()
@@ -40,6 +64,12 @@ if uploaded is not None and st.button("Upload results", type="primary"):
         st.error(f"Upload failed: {exc}")
     else:
         st.session_state["_results_report"] = report
+        if run_id:
+            # The upload already computed and persisted final_score for
+            # every candidate using default weights - show that result
+            # immediately rather than an empty table until Recompute is
+            # clicked.
+            _fetch_final_results()
 
 report = st.session_state.get("_results_report")
 if report:
@@ -69,14 +99,25 @@ if not run_id:
     st.info("Run an evaluation first (page 3) to compute final scores.")
     st.stop()
 
-st.markdown("## Final scoring — instant, zero LLM calls")
+# A page reload (or navigating here before ever clicking Upload above) would
+# otherwise show nothing until the user manually re-weights - fetch the
+# already-computed result once per run instead.
+cached_final = st.session_state.get("_final_results")
+if cached_final is None or cached_final.get("run_id") != run_id:
+    _fetch_final_results()
+
+st.markdown("## Final ranking")
 st.caption(
-    "Blends the stored pre-test score with test_la / test_code. A missing "
-    "test score's weight is redistributed onto the other test component, "
-    "never scored zero."
+    "Final scores were already computed on upload using the default "
+    "weights (pre-test 0.60 / aptitude 0.20 / coding 0.20). The sliders "
+    "below re-weight that existing result - they don't produce the first "
+    "one. Still instant, still zero LLM calls: a missing test score's "
+    "weight is redistributed onto the other test component, never scored "
+    "zero."
 )
 
 with st.form("final_weights_form"):
+    st.markdown("**Re-weight the blend** (only needed to tune the result above)")
     c1, c2, c3 = st.columns(3)
     pre_test_w = c1.slider("Pre-test weight", 0.0, 1.0, 0.60, 0.05)
     test_la_w = c2.slider("Aptitude test weight", 0.0, 1.0, 0.20, 0.05)
@@ -89,25 +130,19 @@ with st.form("final_weights_form"):
     else:
         fthreshold = st.slider("Minimum final score", 0.0, 100.0, 60.0, 1.0)
 
-    submitted = st.form_submit_button("Recompute final ranking", type="primary")
+    submitted = st.form_submit_button("Re-weight and update", type="primary")
 
 if submitted:
-    try:
-        final = client.final_shortlist(
-            run_id,
-            weights={
-                "pre_test": pre_test_w,
-                "test_la": test_la_w,
-                "test_code": test_code_w,
-            },
-            mode=fmode,
-            top_n=int(ftop_n),
-            threshold=float(fthreshold),
-        )
-    except ApiError as exc:
-        st.error(f"Could not recompute final scores: {exc}")
-    else:
-        st.session_state["_final_results"] = final
+    _fetch_final_results(
+        weights={
+            "pre_test": pre_test_w,
+            "test_la": test_la_w,
+            "test_code": test_code_w,
+        },
+        mode=fmode,
+        top_n=int(ftop_n),
+        threshold=float(fthreshold),
+    )
 
 final = st.session_state.get("_final_results")
 if final and final.get("run_id") == run_id:
