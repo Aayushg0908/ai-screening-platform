@@ -166,6 +166,24 @@ class Interview(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class EmailLog(SQLModel, table=True):
+    """One row per send attempt. Tracked by candidate_id, NEVER by email address -
+    every sample candidate shares one inbox, so email-based dedupe would
+    collapse all ten into one "already emailed" record."""
+
+    __tablename__ = "email_log"
+
+    id: int | None = Field(default=None, primary_key=True)
+    candidate_id: int = Field(foreign_key="candidate.candidate_id", index=True)
+    run_id: int = Field(index=True)  # which evaluation run produced the shortlist
+    email_type: str  # "test_invite" (Phase 8 adds "interview_invite")
+    recipient: str
+    subject: str
+    status: str  # "sent" | "failed"
+    error: str | None = None
+    sent_at: datetime = Field(default_factory=_now)
+
+
 class PipelineRun(SQLModel, table=True):
     """Progress row the Streamlit frontend polls - it can't hold background state."""
 

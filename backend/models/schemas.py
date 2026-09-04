@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -364,3 +365,77 @@ class RerankWeights(BaseModel):
         if self.resume + self.github <= 0:
             raise ValueError("blend weights must sum to a positive value")
         return self
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — shortlisting and test-invite emails (§4.6)
+# ---------------------------------------------------------------------------
+
+
+class ShortlistRequest(BaseModel):
+    """Body for ``POST /outreach/preview`` and ``POST /outreach/send``.
+
+    Reads a run's STORED ranked results only - never re-runs evaluation.
+    """
+
+    run_id: int
+    mode: Literal["top_n", "threshold"] = "top_n"
+    top_n: int = 5
+    threshold: float = 60.0
+
+
+class ShortlistItem(BaseModel):
+    candidate_id: int
+    s_no: int
+    name: str
+    email: str
+    pre_test_score: float
+    rank: int
+    already_emailed: bool
+
+
+class ShortlistPreview(BaseModel):
+    """Response for ``POST /outreach/preview``. Sends nothing."""
+
+    run_id: int
+    mode: str
+    criterion: str  # human readable, e.g. "top 5" / "score >= 60"
+    shortlisted: list[ShortlistItem]
+    excluded_count: int
+
+
+class SendResult(BaseModel):
+    candidate_id: int
+    name: str
+    recipient: str
+    status: str  # "sent" | "failed" | "skipped"
+    error: str | None = None
+
+
+class SendReport(BaseModel):
+    """Response for ``POST /outreach/send``."""
+
+    run_id: int
+    attempted: int
+    sent: int
+    failed: int
+    skipped: int  # already emailed, force not set
+    results: list[SendResult]
+    bcc: str | None = None
+    # Which address received a Bcc copy of every message in this send, so a
+    # copy is visibly taken rather than silently hidden. None when EMAIL_BCC
+    # is unset.
+
+
+class EmailLogOut(BaseModel):
+    id: int
+    candidate_id: int
+    run_id: int
+    email_type: str
+    recipient: str
+    subject: str
+    status: str
+    error: str | None = None
+    sent_at: datetime
+
+    model_config = {"from_attributes": True}

@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     smtp_from_name: str = Field(
         "Visl AI Labs Recruitment", validation_alias="SMTP_FROM_NAME"
     )
+    #: Dev/testing only. When set, every outgoing email also goes to this
+    #: address as a Bcc (in the SMTP envelope, never a visible header) so
+    #: real outgoing mail can be inspected. Empty by default.
+    email_bcc: str = Field("", validation_alias="EMAIL_BCC")
 
     # ---- Assessment link mailed to the shortlist -------------------------------
     test_link_url: str = Field("", validation_alias="TEST_LINK_URL")
