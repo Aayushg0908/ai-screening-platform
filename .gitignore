@@ -1,0 +1,37 @@
+# ===== SECRETS — must never be committed =====
+.env
+.env.*
+!.env.example
+credentials.json
+client_secret*.json
+token.json
+token.pickle
+*.pem
+
+# ===== Python =====
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== Local data / artifacts =====
+*.db
+*.sqlite3
+downloads/
+resumes/
+tmp/
+*.log
+
+# ===== Streamlit =====
+.streamlit/secrets.toml
+
+# ===== Editors / OS =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

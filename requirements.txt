@@ -1,0 +1,40 @@
+# ---- Backend ----
+fastapi
+uvicorn[standard]
+python-multipart          # required for FastAPI file uploads
+pydantic
+pydantic-settings
+
+# ---- Database (Neon Postgres) ----
+sqlmodel
+psycopg2-binary
+
+# ---- LLM / orchestration ----
+langchain
+langchain-core
+langchain-community
+langgraph
+langchain-groq            # primary: llama-3.3-70b-versatile (free)
+langchain-google-genai    # fallback when Groq rate-limits (free)
+
+# ---- Data ingest ----
+pandas
+openpyxl                  # .xlsx reading
+
+# ---- Resume processing ----
+pypdf
+httpx                     # async HTTP for Drive + GitHub
+
+# ---- Google Calendar / Meet ----
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+
+# ---- Frontend ----
+streamlit
+requests                  # streamlit -> fastapi calls
+
+# ---- Utilities ----
+python-dotenv
+tenacity                  # retry/backoff on API calls
