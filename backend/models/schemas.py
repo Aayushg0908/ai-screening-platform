@@ -454,6 +454,15 @@ class ResultsReport(BaseModel):
     no_result (absent from the file, e.g. s_no 4 and 10) - and a row present
     in the file but absent from the batch (e.g. s_no 99) is skipped rather
     than creating an orphan.
+
+    The upload also computes and persists ``final_score`` for every evaluated
+    candidate in the batch, using the default weights from config - pure
+    arithmetic over stored scores, no LLM call. ``final_scored`` /
+    ``final_awaiting_result`` count how many landed in each state; a
+    candidate never evaluated at all (no Evaluation row) counts toward
+    neither. The existing weight sliders on POST /results/shortlist still
+    work exactly as before - they re-weight this same result, they just no
+    longer need to be called to produce a first one.
     """
 
     batch_id: int
@@ -463,6 +472,8 @@ class ResultsReport(BaseModel):
     matched: int
     no_result: int
     skipped_unknown: int
+    final_scored: int = 0
+    final_awaiting_result: int = 0
     column_mapping: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 

@@ -11,6 +11,12 @@ NO_RESULT (absent, e.g. s_no 4 and 10) - never dropped, never imputed to
 zero. A row whose s_no isn't in the batch (e.g. s_no 99) is skipped with a
 warning rather than creating an orphan row. Re-uploading a batch's results
 reconciles all of its candidates again, so re-running an upload is safe.
+
+The upload also computes and persists ``final_score`` for every evaluated
+candidate in the batch immediately, using the default weights from config
+(pure arithmetic, no LLM call) - a recruiter gets a first ranked result
+without a separate call to ``compute_final_shortlist``/``/results/shortlist``,
+which still exists unchanged as the re-weighting path.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import re
 
 from sqlmodel import Session, select
 
+from backend.core.config import get_settings
 from backend.models.schemas import (
     FinalResultItem,
     FinalResultsOut,
@@ -146,6 +153,9 @@ def ingest_results(
     matched = 0
     skipped_unknown = 0
     seen_candidate_ids: set[int] = set()
+    # Collected alongside the TestResult upserts below so the final-scoring
+    # pass doesn't need a second query to know each candidate's test scores.
+    test_scores_by_candidate: dict[int, tuple[float | None, float | None]] = {}
 
     for i, row in df.iterrows():
         vals = {canon: row.get(src) for src, canon in mapping.items()}
@@ -193,6 +203,7 @@ def ingest_results(
             )
         matched += 1
         seen_candidate_ids.add(candidate.candidate_id)
+        test_scores_by_candidate[candidate.candidate_id] = (test_la, test_code)
 
     # Every candidate in the batch not seen in this upload -> explicit
     # NO_RESULT. Never dropped, never imputed to zero (dataset trap: s_no 4
@@ -217,6 +228,7 @@ def ingest_results(
                 )
             )
         no_result += 1
+        test_scores_by_candidate[candidate.candidate_id] = (None, None)
 
     session.commit()
     log.info(
@@ -227,6 +239,60 @@ def ingest_results(
         skipped_unknown,
     )
 
+    # Compute final_score for every evaluated candidate in the batch, using
+    # the default weights from config - pure arithmetic over stored scores,
+    # no LLM call. A recruiter should see a first ranked result right after
+    # this upload, not only after separately calling /results/shortlist
+    # (that endpoint still exists, unchanged, for re-weighting this result).
+    settings = get_settings()
+    default_weights = FinalWeights(**settings.final_weights)
+    w = {
+        "pre_test": default_weights.pre_test,
+        "test_la": default_weights.test_la,
+        "test_code": default_weights.test_code,
+    }
+
+    evaluations = session.exec(
+        select(Evaluation).where(
+            Evaluation.candidate_id.in_([c.candidate_id for c in candidates])
+        )
+    ).all()
+
+    final_scored = 0
+    final_awaiting_result = 0
+    for ev in evaluations:
+        test_la, test_code = test_scores_by_candidate.get(ev.candidate_id, (None, None))
+
+        # Candidates with no test result still get AWAITING_RESULT and a
+        # None final_score - compute_final_score/final_evaluation_state
+        # already apply that rule; this pass doesn't change it.
+        final_score = scoring.compute_final_score(ev.pre_test_score, test_la, test_code, w)
+        status = scoring.final_evaluation_state(ev.pre_test_score, test_la, test_code)
+        note = (
+            scoring.final_score_note(test_la, test_code) if status == "scored" else None
+        )
+
+        ev.final_score = final_score
+        ev.final_weights = default_weights.model_dump()
+        ev.final_status = status
+        ev.final_note = note
+        session.add(ev)
+
+        if status == "scored":
+            final_scored += 1
+        elif status == "awaiting_result":
+            final_awaiting_result += 1
+
+    session.commit()
+    log.info(
+        "Results upload batch=%s: final_scored=%s final_awaiting_result=%s "
+        "(default weights %s)",
+        batch_id,
+        final_scored,
+        final_awaiting_result,
+        w,
+    )
+
     return ResultsReport(
         batch_id=batch_id,
         filename=filename,
@@ -235,6 +301,8 @@ def ingest_results(
         matched=matched,
         no_result=no_result,
         skipped_unknown=skipped_unknown,
+        final_scored=final_scored,
+        final_awaiting_result=final_awaiting_result,
         column_mapping={str(k): v for k, v in mapping.items()},
         warnings=warnings,
     )

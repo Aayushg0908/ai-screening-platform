@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import time
 
+from sqlalchemy.exc import DBAPIError
 from sqlmodel import Session, select
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from backend.core.config import get_settings
 from backend.core.logging import get_logger
 from backend.models.schemas import (
+    EmailLogOut,
     SendReport,
     SendResult,
     ShortlistItem,
@@ -35,20 +38,43 @@ SEND_DELAY_SECONDS = 1.0
 EMAIL_TYPE_TEST_INVITE = "test_invite"
 
 
+@retry(
+    retry=retry_if_exception_type(DBAPIError),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, max=8),
+    reraise=True,
+)
+def _exec_all(session: Session, statement) -> list:
+    """Run a read-only SELECT and return every row. Retries a transient DB
+    connectivity failure (e.g. Neon DNS resolution hiccups, seen repeatedly in
+    practice) a few times before giving up - the same failure mode
+    ``core/db.py`` already retries around at startup. Safe to retry: read-only,
+    no side effects.
+    """
+    return list(session.exec(statement).all())
+
+
 def _run_evaluations(session: Session, run_id: int) -> list[Evaluation]:
-    return list(
-        session.exec(select(Evaluation).where(Evaluation.run_id == run_id)).all()
-    )
+    return _exec_all(session, select(Evaluation).where(Evaluation.run_id == run_id))
 
 
 def _already_sent_candidate_ids(session: Session, run_id: int) -> set[int]:
-    rows = session.exec(
+    rows = _exec_all(
+        session,
         select(EmailLog)
         .where(EmailLog.run_id == run_id)
         .where(EmailLog.email_type == EMAIL_TYPE_TEST_INVITE)
-        .where(EmailLog.status == "sent")
-    ).all()
+        .where(EmailLog.status == "sent"),
+    )
     return {row.candidate_id for row in rows}
+
+
+def list_email_log(session: Session, run_id: int) -> list[EmailLogOut]:
+    """All send attempts (sent or failed) recorded for a run."""
+    rows = _exec_all(
+        session, select(EmailLog).where(EmailLog.run_id == run_id).order_by(EmailLog.id)
+    )
+    return [EmailLogOut.model_validate(row) for row in rows]
 
 
 def get_shortlist(session: Session, req: ShortlistRequest) -> ShortlistPreview:
@@ -78,12 +104,17 @@ def get_shortlist(session: Session, req: ShortlistRequest) -> ShortlistPreview:
 
     candidates_by_id = {
         c.candidate_id: c
-        for c in session.exec(
-            select(Candidate).where(
-                Candidate.candidate_id.in_([r["candidate_id"] for r in chosen])
+        for c in (
+            _exec_all(
+                session,
+                select(Candidate).where(
+                    Candidate.candidate_id.in_([r["candidate_id"] for r in chosen])
+                ),
             )
-        ).all()
-    } if chosen else {}
+            if chosen
+            else []
+        )
+    }
 
     already_sent = _already_sent_candidate_ids(session, req.run_id)
 
