@@ -1,17 +1,13 @@
+
 """
-One-time Google OAuth setup.
+Fresh Google Calendar OAuth setup.
 
-Run this ONCE locally to obtain a refresh token for the Google Calendar API.
-The refresh token goes in .env; the deployed app then mints access tokens
-server-side with no interactive login.
+Run this locally to generate a fresh Google OAuth refresh token.
 
-Usage:
-    1. Place your downloaded OAuth client file at the repo root as credentials.json
-    2. python scripts/google_oauth_setup.py
-    3. A browser opens -> sign in with the SAME account you added as a test user
-    4. Copy the three printed values into .env
-
-Requires: google-auth-oauthlib, google-api-python-client
+IMPORTANT:
+- credentials.json must belong to the CURRENT Google OAuth client.
+- Do NOT commit credentials.json or .env.
+- The generated refresh token should be stored only in .env.
 """
 
 import json
@@ -21,63 +17,252 @@ from pathlib import Path
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-# calendar.events is enough to create events with Meet links.
-# Do NOT request full "calendar" scope — least privilege.
-SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events"
+]
 
 ROOT = Path(__file__).resolve().parent.parent
 CLIENT_SECRETS = ROOT / "credentials.json"
 
 
+# ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
+
+def fail(message: str) -> None:
+    print()
+    print("=" * 60)
+    print("[FAIL]")
+    print(message)
+    print("=" * 60)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------
+# Main
+# ---------------------------------------------------------
+
 def main() -> None:
+
+    print("=" * 60)
+    print("        Google Calendar Fresh OAuth Setup")
+    print("=" * 60)
+    print()
+
+    # -----------------------------------------------------
+    # 1. Check credentials.json
+    # -----------------------------------------------------
+
     if not CLIENT_SECRETS.exists():
-        sys.exit(
-            f"Missing {CLIENT_SECRETS}\n"
-            "Download your OAuth client JSON from Google Cloud Console\n"
-            "(APIs & Services > Credentials > your Desktop client > Download JSON)\n"
-            "and save it at the repo root as credentials.json"
+        fail(
+            f"credentials.json was not found.\n\n"
+            f"Expected location:\n{CLIENT_SECRETS}"
         )
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRETS), SCOPES)
+    print("[ok] credentials.json found")
+    print("[info] Using:", CLIENT_SECRETS)
+    print()
 
-    # access_type=offline is what makes Google issue a refresh token at all.
-    # prompt=consent forces a NEW refresh token even if you've authorised before —
-    # without it, a repeat run returns refresh_token=None and you'll think it broke.
-    creds = flow.run_local_server(
-        port=0,
-        access_type="offline",
-        prompt="consent",
-        open_browser=True,
-    )
+    # -----------------------------------------------------
+    # 2. Read OAuth client information
+    # -----------------------------------------------------
 
-    if not creds.refresh_token:
-        sys.exit(
-            "No refresh token returned. Revoke this app's access at\n"
-            "https://myaccount.google.com/permissions and run again."
-        )
-
-    # Prove the credentials actually work before you trust them.
     try:
-        service = build("calendar", "v3", credentials=creds)
-        cal = service.calendars().get(calendarId="primary").execute()
-        print(f"\n[ok] Authenticated. Primary calendar: {cal.get('summary')}")
-    except Exception as exc:  # noqa: BLE001
-        print(f"\n[warn] Token issued but Calendar API call failed: {exc}")
-        print("Check that the Google Calendar API is ENABLED for this project.")
+        with open(CLIENT_SECRETS, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
 
-    with open(ROOT / "credentials.json", encoding="utf-8") as fh:
-        data = json.load(fh)
-    installed = data.get("installed") or data.get("web") or {}
+    except Exception as exc:
+        fail(f"Could not read credentials.json:\n{exc}")
 
-    print("\n" + "=" * 62)
-    print("Copy these into your .env file:")
-    print("=" * 62)
-    print(f"GOOGLE_CLIENT_ID={installed.get('client_id', '')}")
-    print(f"GOOGLE_CLIENT_SECRET={installed.get('client_secret', '')}")
-    print(f"GOOGLE_REFRESH_TOKEN={creds.refresh_token}")
+    installed = data.get("installed") or data.get("web")
+
+    if not installed:
+        fail(
+            "credentials.json does not contain "
+            "'installed' or 'web' OAuth configuration."
+        )
+
+    client_id = installed.get("client_id")
+    client_secret = installed.get("client_secret")
+
+    if not client_id:
+        fail("client_id is missing from credentials.json")
+
+    if not client_secret:
+        fail("client_secret is missing from credentials.json")
+
+    print("[ok] OAuth configuration loaded")
+    print()
+    print("[info] Client ID:")
+    print(client_id)
+    print()
+    print("[info] Client secret found")
+    print("[info] OAuth scope:")
+    print(SCOPES[0])
+    print()
+
+    # -----------------------------------------------------
+    # 3. Start fresh OAuth authorization
+    # -----------------------------------------------------
+
+    print("=" * 60)
+    print("Opening Google authorization in your browser...")
+    print("=" * 60)
+    print()
+
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(CLIENT_SECRETS),
+            SCOPES,
+        )
+
+        credentials = flow.run_local_server(
+            port=0,
+            access_type="offline",
+            prompt="consent",
+            open_browser=True,
+        )
+
+    except Exception as exc:
+        fail(
+            "Google OAuth authorization failed.\n\n"
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    # -----------------------------------------------------
+    # 4. Check refresh token
+    # -----------------------------------------------------
+
+    if not credentials.refresh_token:
+        fail(
+            "Google did not return a refresh token.\n\n"
+            "Run the authorization again and make sure "
+            "consent is granted."
+        )
+
+    print()
+    print("[ok] OAuth authorization completed")
+    print("[ok] Fresh refresh token received")
+    print()
+
+    # -----------------------------------------------------
+    # 5. Build Calendar API
+    # -----------------------------------------------------
+
+    try:
+        service = build(
+            "calendar",
+            "v3",
+            credentials=credentials,
+            cache_discovery=False,
+        )
+
+    except Exception as exc:
+        fail(
+            "Could not create Google Calendar API client.\n\n"
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    print("[ok] Calendar API client created")
+
+    # -----------------------------------------------------
+    # 6. Test actual Calendar permission
+    # -----------------------------------------------------
+
+    test_event = {
+        "summary": "AI Screening Platform - OAuth Test",
+        "description": (
+            "Temporary event created during Google OAuth setup. "
+            "It will be deleted automatically."
+        ),
+        "start": {
+            "dateTime": "2026-09-05T10:00:00+05:30",
+            "timeZone": "Asia/Kolkata",
+        },
+        "end": {
+            "dateTime": "2026-09-05T10:30:00+05:30",
+            "timeZone": "Asia/Kolkata",
+        },
+    }
+
+    event_id = None
+
+    try:
+        print()
+        print("[info] Testing Calendar event creation...")
+
+        created_event = service.events().insert(
+            calendarId="primary",
+            body=test_event,
+        ).execute()
+
+        event_id = created_event.get("id")
+
+        if not event_id:
+            fail("Calendar event was created but no event ID was returned.")
+
+        print("[ok] Calendar event created")
+        print("[ok] Event ID:", event_id)
+
+        if created_event.get("htmlLink"):
+            print("[ok] Event URL:", created_event["htmlLink"])
+
+    except Exception as exc:
+        fail(
+            "Calendar event creation failed.\n\n"
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    # -----------------------------------------------------
+    # 7. Delete test event
+    # -----------------------------------------------------
+
+    try:
+        print()
+        print("[info] Deleting temporary test event...")
+
+        service.events().delete(
+            calendarId="primary",
+            eventId=event_id,
+        ).execute()
+
+        print("[ok] Test event deleted")
+
+    except Exception as exc:
+        print()
+        print("[WARN] Event was created but could not be deleted.")
+        print(type(exc).__name__, ":", exc)
+
+    # -----------------------------------------------------
+    # 8. Print values for .env
+    # -----------------------------------------------------
+
+    print()
+    print("=" * 60)
+    print("[SUCCESS] Google Calendar OAuth is working")
+    print("=" * 60)
+    print()
+
+    print("Copy the following values into your .env file:")
+    print()
+
+    print(f"GOOGLE_CLIENT_ID={client_id}")
+    print(f"GOOGLE_CLIENT_SECRET={client_secret}")
+    print(f"GOOGLE_REFRESH_TOKEN={credentials.refresh_token}")
     print("GOOGLE_CALENDAR_ID=primary")
-    print("=" * 62)
-    print("\nDo NOT commit credentials.json or .env.")
+
+    print()
+    print("=" * 60)
+    print("IMPORTANT")
+    print("=" * 60)
+    print("Do NOT commit .env or credentials.json.")
+    print("Do NOT share the refresh token or client secret.")
+    print()
 
 
 if __name__ == "__main__":
