@@ -209,7 +209,7 @@ def send_test_invites(
         subject, text_body, html_body = mailer.build_test_invite(
             candidate, job, settings.test_link_url
         )
-        ok, error = mailer.send_email(item.email, subject, text_body, html_body)
+        ok, error, route = mailer.send_email(item.email, subject, text_body, html_body)
         status = "sent" if ok else "failed"
 
         session.add(
@@ -232,6 +232,7 @@ def send_test_invites(
                 recipient=item.email,
                 status=status,
                 error=error,
+                route=route,
             )
         )
         if ok:

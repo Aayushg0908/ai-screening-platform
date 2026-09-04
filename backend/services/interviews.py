@@ -165,11 +165,12 @@ def schedule_interviews(
             error = f"{type(exc).__name__}: {exc}"
 
         invite_sent = False
+        invite_route = None
         if status == "scheduled" and req.send_invites:
             subject, text_body, html_body = mailer.build_interview_invite(
                 cand, job, start, end, req.timezone, meet_link
             )
-            invite_sent, mail_error = mailer.send_email(
+            invite_sent, mail_error, invite_route = mailer.send_email(
                 cand.email, subject, text_body, html_body
             )
             if not invite_sent:
@@ -220,6 +221,7 @@ def schedule_interviews(
                 status=status,
                 error=error,
                 invite_sent=invite_sent,
+                invite_route=invite_route,
             )
         )
         if status == "scheduled":

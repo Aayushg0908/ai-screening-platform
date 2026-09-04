@@ -410,6 +410,8 @@ class SendResult(BaseModel):
     recipient: str
     status: str  # "sent" | "failed" | "skipped"
     error: str | None = None
+    route: str | None = None  # e.g. "smtp.gmail.com:465 via 142.250.x.x" - which
+    # port/address actually delivered it, for diagnosing cloud egress issues
 
 
 class SendReport(BaseModel):
@@ -603,6 +605,7 @@ class ScheduledInterview(BaseModel):
     status: str  # "scheduled" | "failed" | "skipped"
     error: str | None = None
     invite_sent: bool = False
+    invite_route: str | None = None  # which SMTP port/address delivered the invite
 
 
 class ScheduleReport(BaseModel):

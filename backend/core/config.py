@@ -94,9 +94,13 @@ class Settings(BaseSettings):
         description="Fine-grained PAT; unauthenticated GitHub is 60 req/hr.",
     )
 
-    # ---- Email: Gmail SMTP over STARTTLS ------------------------------------
+    # ---- Email: Gmail SMTP over STARTTLS, falling back to implicit SSL -----
     smtp_host: str = Field("smtp.gmail.com", validation_alias="SMTP_HOST")
     smtp_port: int = Field(587, validation_alias="SMTP_PORT")
+    #: Cloud egress ranges (Render included) sometimes block/throttle 587
+    #: while leaving 465 open - tried second, via implicit SSL rather than
+    #: STARTTLS.
+    smtp_port_fallback: int = Field(465, validation_alias="SMTP_PORT_FALLBACK")
     smtp_user: str = Field("", validation_alias="SMTP_USER")
     smtp_password: str = Field("", validation_alias="SMTP_PASSWORD")
     smtp_from_name: str = Field(
