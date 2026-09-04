@@ -18,8 +18,8 @@ langchain
 langchain-core
 langchain-community
 langgraph
-langchain-groq            # primary: llama-3.3-70b-versatile (free)
-langchain-google-genai    # fallback when Groq rate-limits (free)
+langchain-groq            # primary: Groq openai/gpt-oss-120b (free, open-weights)
+langchain-mistralai       # fallback when Groq rate-limits / 5xx
 
 # ---- Data ingest ----
 pandas

@@ -38,12 +38,11 @@ class Settings(BaseSettings):
         description="Groq model id; the LLM factory reads this, never a literal.",
     )
 
-    # ---- LLM: Google Gemini (fallback on Groq rate-limit) --------------------
-    google_api_key: str = Field(
-        "",
-        validation_alias=AliasChoices("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    # ---- LLM: Mistral (fallback on Groq rate-limit / 5xx) -------------------
+    mistral_api_key: str = Field("", validation_alias="MISTRAL_API_KEY")
+    mistral_model: str = Field(
+        "ministral-8b-latest", validation_alias="MISTRAL_MODEL"
     )
-    gemini_model: str = Field("gemini-2.0-flash", validation_alias="GEMINI_MODEL")
 
     # ---- GitHub -----------------------------------------------------------------
     github_token: str = Field(

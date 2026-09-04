@@ -124,6 +124,8 @@ class Evaluation(SQLModel, table=True):
     job_id: int = Field(foreign_key="job_description.job_id", index=True)
     resume_eval: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     github_eval: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    weights: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    model_used: str | None = None
     pre_test_score: float | None = None
     final_score: float | None = None
     errors: list[str] = Field(default_factory=list, sa_column=Column(JSON))

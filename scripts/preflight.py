@@ -83,22 +83,23 @@ def check_groq() -> None:
         report("Groq LLM", False, str(exc)[:110])
 
 
-def check_gemini() -> None:
-    key = env("GOOGLE_API_KEY")
+def check_mistral() -> None:
+    key = env("MISTRAL_API_KEY")
     if not key:
-        return skip("Gemini fallback", "GOOGLE_API_KEY not set (optional)")
+        return skip("Mistral fallback", "MISTRAL_API_KEY not set (optional)")
     try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
+        from langchain_mistralai import ChatMistralAI
 
-        llm = ChatGoogleGenerativeAI(
-            model=env("GEMINI_MODEL") or "gemini-2.0-flash",
-            google_api_key=key,
+        llm = ChatMistralAI(
+            model=env("MISTRAL_MODEL") or "mistral-large-latest",
+            api_key=key,
             temperature=0,
+            max_retries=0,
         )
         out = llm.invoke("Reply with exactly: OK").content.strip()
-        report("Gemini fallback", True, f"responded: {out[:30]!r}")
+        report("Mistral fallback", True, f"responded: {out[:30]!r}")
     except Exception as exc:
-        report("Gemini fallback", False, str(exc)[:110])
+        report("Mistral fallback", False, str(exc)[:110])
 
 
 def check_github() -> None:
@@ -234,7 +235,7 @@ def main() -> None:
 
     check_database()
     check_groq()
-    check_gemini()
+    check_mistral()
     check_github()
     check_smtp(send=args.full)
     check_calendar(create=args.full)

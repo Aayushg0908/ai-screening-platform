@@ -76,9 +76,9 @@ required — the deadline is the binding constraint.
   contains **no business logic**. Never import from `backend/` inside `frontend/`.
 - **DB:** Postgres (Neon free tier) via SQLModel. Never SQLite — hosts have
   ephemeral filesystems and the DB would vanish on redeploy.
-- **LLM:** Groq `openai/gpt-oss-120b` (open-weights, free tier). Google Gemini via
-  `langchain-google-genai` as fallback on rate limit. Both behind `services/llm.py`
-  so the provider swaps in one place.
+- **LLM:** Groq `openai/gpt-oss-120b` (open-weights, free tier). Mistral
+  (`mistral-large-latest`) via `langchain-mistralai` as fallback on rate limit /
+  5xx. Both behind `services/llm.py` so the provider swaps in one place.
   **Note:** Groq deprecated all Llama models in 2026. Never use
   `llama-3.3-70b-versatile` or any `llama-*` id — they return 404. Model ids come
   from config, never hardcoded.

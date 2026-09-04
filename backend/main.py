@@ -1,7 +1,8 @@
 """FastAPI application entry point.
 
-Registers the active route modules (Phase 1: candidates), enables CORS for the
-Streamlit frontend, and initialises the database schema on startup.
+Registers the active route modules (Phases 1-3: candidates, jobs, evaluate),
+enables CORS for the Streamlit frontend, and initialises the database schema on
+startup.
 
 Run with::
 
@@ -16,10 +17,9 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api.routes import candidates
+from backend.api.routes import candidates, evaluation, jobs
 
-# Phase 3: evaluation, interviews, jobs, outreach, results routers land with
-# their schemas (Dimension/ResumeEvaluation/GitHubEvaluation/FinalScore, etc.).
+# Phase 4+: interviews, outreach, results routers land with their schemas.
 from backend.core.config import get_settings
 from backend.core.db import check_db, init_db
 from backend.core.logging import configure_logging, get_logger
@@ -51,7 +51,8 @@ app.add_middleware(
 )
 
 app.include_router(candidates.router)
-# Phase 3: app.include_router(jobs.router) etc.
+app.include_router(jobs.router)
+app.include_router(evaluation.router)
 
 
 @app.get("/health", tags=["health"])
