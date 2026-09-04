@@ -6,8 +6,12 @@ pydantic
 pydantic-settings
 
 # ---- Database (Neon Postgres) ----
+# Neon is plain Postgres over the wire - no Neon-specific client library exists
+# for Python. Connect with the standard driver below using the pooled
+# connection string and sslmode=require (see backend/core/config.py).
 sqlmodel
-psycopg2-binary
+sqlalchemy                # imported directly in backend/core/db.py + models
+psycopg2-binary           # Postgres driver used to reach Neon
 
 # ---- LLM / orchestration ----
 langchain
