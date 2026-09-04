@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Literal
 
@@ -550,3 +550,74 @@ class FinalResultsOut(BaseModel):
     shortlisted: list[FinalResultItem]  # the mode/top_n|threshold subset of ranked
     awaiting_result: list[FinalResultItem]
     unscorable: list[FinalResultItem]
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — interview scheduling: Google Calendar + Meet (§4.8)
+# ---------------------------------------------------------------------------
+
+
+class ScheduleRequest(BaseModel):
+    """Body for ``POST /interviews/schedule``.
+
+    Qualified candidates are resolved from STORED final scores (Phase 7) -
+    zero re-evaluation. ``start_date`` defaults to tomorrow (in ``timezone``)
+    when omitted.
+    """
+
+    run_id: int
+    mode: Literal["top_n", "threshold"] = "top_n"
+    top_n: int = 3
+    threshold: float = 65.0
+    start_date: date | None = None  # defaults to tomorrow
+    day_start_hour: int = 10  # local time
+    day_end_hour: int = 17
+    slot_minutes: int = 45
+    gap_minutes: int = 15
+    timezone: str = "Asia/Kolkata"
+    send_invites: bool = True
+
+
+class ScheduledInterview(BaseModel):
+    candidate_id: int
+    s_no: int
+    name: str
+    email: str
+    rank: int | None = None
+    final_score: float | None = None
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    meet_link: str | None = None
+    event_id: str | None = None
+    status: str  # "scheduled" | "failed" | "skipped"
+    error: str | None = None
+    invite_sent: bool = False
+
+
+class ScheduleReport(BaseModel):
+    """Response for ``POST /interviews/schedule``."""
+
+    run_id: int
+    attempted: int
+    scheduled: int
+    failed: int
+    skipped: int
+    interviews: list[ScheduledInterview]
+
+
+class InterviewOut(BaseModel):
+    """Response item for ``GET /interviews``."""
+
+    id: int
+    candidate_id: int
+    run_id: int
+    s_no: int
+    name: str
+    email: str
+    event_id: str | None = None
+    meet_link: str | None = None
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    status: str
+    error: str | None = None
+    created_at: datetime

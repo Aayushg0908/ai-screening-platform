@@ -39,6 +39,13 @@ _COLUMN_MIGRATIONS: list[str] = [
     "ALTER TABLE evaluation ADD COLUMN IF NOT EXISTS final_weights JSONB DEFAULT '{}'::jsonb",
     "ALTER TABLE evaluation ADD COLUMN IF NOT EXISTS final_status VARCHAR",
     "ALTER TABLE evaluation ADD COLUMN IF NOT EXISTS final_note VARCHAR",
+    # Phase 8 (§4.8): interview scheduling - run_id, end time, outcome.
+    "ALTER TABLE interview ADD COLUMN IF NOT EXISTS run_id INTEGER",
+    "ALTER TABLE interview ADD COLUMN IF NOT EXISTS ends_at TIMESTAMP",
+    "ALTER TABLE interview ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'failed'",
+    "ALTER TABLE interview ADD COLUMN IF NOT EXISTS error VARCHAR",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_interview_candidate_run "
+    "ON interview (candidate_id, run_id)",
 ]
 
 

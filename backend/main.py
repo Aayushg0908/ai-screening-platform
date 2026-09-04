@@ -17,9 +17,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api.routes import candidates, evaluation, jobs, outreach, results
-
-# Phase 8+: interviews router lands with its schemas.
+from backend.api.routes import candidates, evaluation, interviews, jobs, outreach, results
 from backend.core.config import get_settings
 from backend.core.db import check_db, init_db
 from backend.core.logging import configure_logging, get_logger
@@ -55,6 +53,7 @@ app.include_router(jobs.router)
 app.include_router(evaluation.router)
 app.include_router(outreach.router)
 app.include_router(results.router)
+app.include_router(interviews.router)
 
 
 @app.get("/health", tags=["health"])

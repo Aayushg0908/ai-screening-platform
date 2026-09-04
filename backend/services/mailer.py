@@ -8,6 +8,7 @@ candidate-facing.
 from __future__ import annotations
 
 import smtplib
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
@@ -71,6 +72,58 @@ def build_test_invite(
     </p>
     <p>Or copy this link into your browser:<br><a href="{test_link}">{test_link}</a></p>
     <p>Please complete it within <strong>3 days</strong> of receiving this email.</p>
+    <p>Best regards,<br>{from_label}</p>
+  </body>
+</html>"""
+
+    return subject, text_body, html_body
+
+
+def build_interview_invite(
+    candidate: Candidate,
+    job: JobDescription,
+    start: datetime,
+    end: datetime,
+    tz: str,
+    meet_link: str,
+) -> tuple[str, str, str]:
+    """Return ``(subject, text_body, html_body)`` for an interview
+    invitation: candidate name, role, date/time with timezone, and the Meet
+    link. No score or evaluation reasoning - that is recruiter-facing.
+    """
+    first_name = (candidate.name or "there").strip().split(" ")[0] or "there"
+    from_label = get_settings().smtp_from_name
+    when = f"{start.strftime('%A, %d %B %Y, %I:%M %p')} - {end.strftime('%I:%M %p')} ({tz})"
+    subject = f"Interview scheduled: {job.title} role"
+
+    text_body = (
+        f"Hi {first_name},\n\n"
+        f"Congratulations on progressing to the interview stage for the "
+        f"{job.title} role. Your interview has been scheduled:\n\n"
+        f"When: {when}\n"
+        f"Where: Google Meet - {meet_link}\n\n"
+        "Please join a few minutes early to test your camera and microphone.\n\n"
+        "Best regards,\n"
+        f"{from_label}"
+    )
+
+    html_body = f"""\
+<html>
+  <body style="font-family: Arial, Helvetica, sans-serif; color: #1a1a1a; line-height: 1.5;">
+    <p>Hi {first_name},</p>
+    <p>Congratulations on progressing to the interview stage for the
+       <strong>{job.title}</strong> role. Your interview has been scheduled:</p>
+    <p><strong>When:</strong> {when}<br>
+       <strong>Where:</strong> Google Meet</p>
+    <p>
+      <a href="{meet_link}"
+         style="display:inline-block;padding:10px 20px;background:#2563eb;
+                color:#ffffff;text-decoration:none;border-radius:6px;">
+        Join the interview
+      </a>
+    </p>
+    <p>Or copy this link into your browser:<br><a href="{meet_link}">{meet_link}</a></p>
+    <p>Please join a few minutes early to test your camera and microphone.</p>
     <p>Best regards,<br>{from_label}</p>
   </body>
 </html>"""

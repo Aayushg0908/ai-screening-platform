@@ -161,13 +161,23 @@ class TestResult(SQLModel, table=True):
 
 
 class Interview(SQLModel, table=True):
+    """One row per (candidate, run) - re-scheduling updates this row rather
+    than inserting a duplicate."""
+
     __tablename__ = "interview"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", "run_id", name="uq_interview_candidate_run"),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     candidate_id: int = Field(foreign_key="candidate.candidate_id", index=True)
+    run_id: int = Field(index=True)
     event_id: str | None = None
     meet_link: str | None = None
     starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    status: str = "failed"  # "scheduled" | "failed"
+    error: str | None = None
     created_at: datetime = Field(default_factory=_now)
 
 
