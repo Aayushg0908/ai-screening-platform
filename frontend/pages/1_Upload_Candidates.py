@@ -38,6 +38,9 @@ if uploaded is not None:
             st.error(f"Upload failed: {exc}")
         else:
             _cached_candidates.clear()
+            if report["batch_id"] != st.session_state.get("batch_id"):
+                st.session_state.pop("resumes_processed_batch_id", None)
+                st.session_state.pop("_resume_report", None)
             st.session_state["_last_ingest_report"] = report
             st.session_state["_last_ingest_file"] = (uploaded.name, uploaded.getvalue())
             st.session_state["batch_id"] = report["batch_id"]
@@ -64,6 +67,9 @@ if report and report.get("available_sheets") and len(report["available_sheets"])
         except ApiError as exc:
             st.error(f"Upload failed: {exc}")
         else:
+            if report["batch_id"] != st.session_state.get("batch_id"):
+                st.session_state.pop("resumes_processed_batch_id", None)
+                st.session_state.pop("_resume_report", None)
             st.session_state["_last_ingest_report"] = report
             st.session_state["batch_id"] = report["batch_id"]
             st.success(f"Batch {report['batch_id']}: inserted {report['inserted']} rows.")
@@ -107,3 +113,61 @@ else:
         st.error(f"Could not load candidates: {exc}")
     else:
         st.dataframe(candidates, width="stretch", hide_index=True)
+
+    st.divider()
+    st.subheader("Process resumes")
+    resumes_processed = st.session_state.get("resumes_processed_batch_id") == batch_id
+    if resumes_processed:
+        st.success(
+            "Resumes processed for this batch - evaluation will read real "
+            "resume text."
+        )
+    else:
+        st.warning(
+            "**Required before evaluation.** Without this step, the LLM "
+            "evaluates from CSV fields alone and never reads the actual "
+            "resume PDF behind each candidate's Drive link."
+        )
+    force_resumes = st.checkbox(
+        "Force re-download (even if already processed)", key="_force_resumes"
+    )
+    if st.button("Process resumes", type="primary"):
+        try:
+            with st.spinner(
+                f"Downloading and extracting resumes for batch {batch_id} - "
+                "this can take 30-60s for 10 candidates..."
+            ):
+                resume_report = client.process_resumes(batch_id, force=force_resumes)
+        except ApiError as exc:
+            st.error(f"Resume processing failed: {exc}")
+        else:
+            st.session_state["resumes_processed_batch_id"] = batch_id
+            st.session_state["_resume_report"] = resume_report
+            st.success(
+                f"Processed batch {batch_id}: {resume_report['succeeded']} "
+                f"succeeded, {resume_report['failed']} failed, "
+                f"{resume_report['skipped']} skipped, out of "
+                f"{resume_report['total']}."
+            )
+            st.rerun()
+
+    resume_report = st.session_state.get("_resume_report")
+    if resume_report:
+        st.markdown("#### Resume processing report")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total", resume_report["total"])
+        m2.metric("Succeeded", resume_report["succeeded"])
+        m3.metric("Failed", resume_report["failed"])
+        m4.metric("Skipped", resume_report["skipped"])
+        st.dataframe(
+            resume_report.get("items") or [], width="stretch", hide_index=True
+        )
+        failed_items = [
+            i for i in resume_report.get("items") or [] if i.get("error")
+        ]
+        if failed_items:
+            with st.expander(f"Failure reasons ({len(failed_items)})", expanded=True):
+                for item in failed_items:
+                    st.warning(
+                        f"s_no {item['s_no']} — {item['name']}: {item['error']}"
+                    )

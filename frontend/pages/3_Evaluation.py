@@ -27,6 +27,36 @@ if not job_id:
 
 st.write(f"Batch **#{batch_id}** vs job **#{job_id}**")
 
+# Frontend-side check only (no backend logic change): resume processing
+# (page 1) is required for a real evaluation but not enforced by the API.
+# POST /candidates/batches/{id}/resumes always processes the whole batch
+# together, so one candidate's resume status is a reliable proxy for
+# "has this batch been processed at all".
+has_resume_text = None
+resume_check_error = None
+try:
+    _probe_candidates = client.list_candidates(batch_id=batch_id)
+    if _probe_candidates:
+        has_resume_text = (
+            client.get_candidate_resume(_probe_candidates[0]["candidate_id"])
+            is not None
+        )
+except ApiError as exc:
+    resume_check_error = str(exc)
+
+if has_resume_text is False:
+    st.warning(
+        "**No resume text found for this batch.** Evaluations will run on "
+        "dataset fields only — the LLM will never read the actual resume "
+        "PDF behind each candidate's link. This fallback is legitimate "
+        "behaviour, but for a more accurate evaluation go to **page 1** and "
+        "click **Process resumes** first. You can also proceed as-is."
+    )
+elif has_resume_text is True:
+    st.caption("✅ Resume text found for this batch — evaluation will read real resume content.")
+elif resume_check_error:
+    st.caption(f"(Could not check resume status: {resume_check_error})")
+
 mode = st.radio("Evaluation mode", options=["fast", "quality"], index=0, horizontal=True)
 st.caption(
     "**fast** (default): falls back to a smaller model under Groq's free-tier "

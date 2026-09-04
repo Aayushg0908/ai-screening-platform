@@ -107,6 +107,28 @@ class ApiClient:
     def list_batches(self) -> list[dict[str, Any]]:
         return self._request("GET", "/candidates/batches")
 
+    def process_resumes(self, batch_id: int, force: bool = False) -> dict[str, Any]:
+        """Download + extract resume text for every candidate in the batch
+        (§4.2). Required before evaluation reads real resume content rather
+        than falling back to dataset fields alone."""
+        return self._request(
+            "POST",
+            f"/candidates/batches/{batch_id}/resumes",
+            params={"force": force},
+        )
+
+    def get_candidate_resume(self, candidate_id: int) -> dict[str, Any] | None:
+        """Resume text status for one candidate. ``None`` if resume
+        processing has never been run (404) - since a batch is always
+        processed as a whole, checking one candidate is a cheap proxy for
+        "has this batch been processed at all"."""
+        try:
+            return self._request("GET", f"/candidates/{candidate_id}/resume")
+        except ApiError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+
     # -- jobs (§4.3) -------------------------------------------------------------
     def create_job(self, title: str, description: str) -> dict[str, Any]:
         return self._request(
