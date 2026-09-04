@@ -94,21 +94,28 @@ class Settings(BaseSettings):
         description="Fine-grained PAT; unauthenticated GitHub is 60 req/hr.",
     )
 
-    # ---- Email: Gmail SMTP over STARTTLS, falling back to implicit SSL -----
-    smtp_host: str = Field("smtp.gmail.com", validation_alias="SMTP_HOST")
-    smtp_port: int = Field(587, validation_alias="SMTP_PORT")
-    #: Cloud egress ranges (Render included) sometimes block/throttle 587
-    #: while leaving 465 open - tried second, via implicit SSL rather than
-    #: STARTTLS.
-    smtp_port_fallback: int = Field(465, validation_alias="SMTP_PORT_FALLBACK")
-    smtp_user: str = Field("", validation_alias="SMTP_USER")
-    smtp_password: str = Field("", validation_alias="SMTP_PASSWORD")
+    # ---- Email: Resend HTTP API (§4.6) --------------------------------------
+    # Switched from Gmail SMTP: Render's egress cannot reliably reach Gmail's
+    # SMTP frontends on any port (confirmed - 0-8% send success rate even
+    # after retrying every resolved address on both 587 and 465). Resend is a
+    # plain HTTPS POST on port 443, immune to that class of problem.
+    resend_api_key: str = Field("", validation_alias="RESEND_API_KEY")
+    resend_from: str = Field(
+        "AI Screening Platform <onboarding@resend.dev>",
+        validation_alias="RESEND_FROM",
+        description="Resend's sandbox sender (onboarding@resend.dev) can only "
+        "send to the account's own verified address until a domain is "
+        "verified at resend.com/domains.",
+    )
+    #: Signature name in the email body - kept independent of the transport.
     smtp_from_name: str = Field(
         "Visl AI Labs Recruitment", validation_alias="SMTP_FROM_NAME"
     )
     #: Dev/testing only. When set, every outgoing email also goes to this
-    #: address as a Bcc (in the SMTP envelope, never a visible header) so
-    #: real outgoing mail can be inspected. Empty by default.
+    #: address as a Bcc so real outgoing mail can be inspected. Empty by
+    #: default. (SMTP_HOST/PORT/USER/PASSWORD still exist in .env for
+    #: scripts/preflight.py's independent Gmail check - backend/ itself no
+    #: longer reads them.)
     email_bcc: str = Field("", validation_alias="EMAIL_BCC")
 
     # ---- Assessment link mailed to the shortlist -------------------------------
