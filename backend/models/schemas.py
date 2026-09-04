@@ -51,3 +51,29 @@ class BatchOut(BaseModel):
     row_count: int
 
     model_config = {"from_attributes": True}
+
+
+class ResumeItem(BaseModel):
+    """Per-candidate outcome of resume download + text extraction (§4.2)."""
+
+    candidate_id: int
+    s_no: int
+    name: str
+    status: str  # "ok" | "empty" | "failed" | "skipped"
+    chars: int = 0
+    error: str | None = None
+
+
+class ResumeReport(BaseModel):
+    """What POST /candidates/batches/{batch_id}/resumes returns.
+
+    ``failed`` also counts ``"empty"`` items (extracted text under 100 chars),
+    so ``succeeded + failed + skipped == total``.
+    """
+
+    batch_id: int
+    total: int
+    succeeded: int
+    failed: int
+    skipped: int
+    items: list[ResumeItem]
