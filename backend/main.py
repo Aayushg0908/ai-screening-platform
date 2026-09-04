@@ -4,9 +4,15 @@ Registers the active route modules (candidates, jobs, evaluate, outreach),
 enables CORS for the Streamlit frontend, and initialises the database schema on
 startup.
 
-Run with::
+Run locally with::
 
     uvicorn backend.main:app --reload --port 8000
+
+Render (or any host injecting $PORT) needs the process bound to 0.0.0.0, not
+the 127.0.0.1 uvicorn defaults to - the platform can't reach the port
+otherwise and marks the service unhealthy::
+
+    uvicorn backend.main:app --host 0.0.0.0 --port $PORT
 """
 
 from __future__ import annotations
@@ -24,8 +30,7 @@ from backend.core.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
 
-#: Origins allowed to call this API (the Streamlit dev server).
-ALLOWED_ORIGINS = ["http://localhost:8501"]
+_settings = get_settings()
 
 
 @asynccontextmanager
@@ -42,7 +47,10 @@ app = FastAPI(title="AI Screening Platform", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    # Origins allowed to call this API - comma-separated in CORS_ORIGINS, e.g.
+    # "https://my-frontend.onrender.com,http://localhost:8501" so local dev
+    # keeps working after deploy. Defaults to the Streamlit dev server alone.
+    allow_origins=_settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

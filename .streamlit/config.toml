@@ -1,0 +1,6 @@
+# Deployment defaults so Render's start command doesn't need to carry every
+# flag on the command line. --server.port and --server.address still come
+# from the start command itself, since $PORT is only known at runtime.
+[server]
+headless = true
+enableXsrfProtection = false

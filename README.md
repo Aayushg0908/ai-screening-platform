@@ -73,6 +73,39 @@ curl http://localhost:8000/health
 # {"status":"ok","db":true}
 ```
 
+## Deployment (Render)
+
+Two separate services, backend and frontend, each reading `$PORT` from the
+environment Render injects - binding to `127.0.0.1` (uvicorn's default) or a
+hardcoded port makes Render mark the service unhealthy, since the platform
+can't reach it.
+
+```bash
+# backend service - start command
+uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+
+# frontend service - start command
+streamlit run frontend/app.py --server.port=$PORT --server.address=0.0.0.0 \
+  --server.headless=true --server.enableXsrfProtection=false
+```
+
+`.streamlit/config.toml` sets `headless`/`enableXsrfProtection` too, so they
+apply even if a platform ignores extra CLI flags.
+
+Environment variables specific to deployment (everything else is the same
+`.env` values, set directly in Render's dashboard instead of a file):
+
+- `CORS_ORIGINS` on the **backend** service - comma-separated, must include
+  the frontend's Render URL: `https://my-frontend.onrender.com,http://localhost:8501`
+  (keeping `localhost:8501` in the list means local dev still works).
+- `API_BASE_URL` on the **frontend** service - the backend service's own
+  Render URL, e.g. `https://my-backend.onrender.com` (locally this is
+  `http://localhost:8000`).
+
+`runtime.txt` pins `python-3.11.9` - Render defaults to a newer Python
+otherwise, and some wheels in this dependency set don't build cleanly on
+3.12+.
+
 ## Configuration
 
 Every environment variable is declared once in

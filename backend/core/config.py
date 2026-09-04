@@ -123,6 +123,19 @@ class Settings(BaseSettings):
     environment: str = Field("development", validation_alias="ENVIRONMENT")
     log_level: str = Field("INFO", validation_alias="LOG_LEVEL")
 
+    # ---- CORS: origins allowed to call this API ------------------------------
+    # Comma-separated so Render can list both the deployed frontend and
+    # localhost in one value - local dev keeps working after deploy.
+    cors_origins_raw: str = Field(
+        "http://localhost:8501", validation_alias="CORS_ORIGINS"
+    )
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """``CORS_ORIGINS`` parsed into a list - whitespace-trimmed, empty
+        entries dropped."""
+        return [o.strip() for o in self.cors_origins_raw.split(",") if o.strip()]
+
     # ---- Resume / JD scoring weights (deterministic aggregation) -------------
     w_resume_jd: float = Field(0.40, validation_alias="W_RESUME_JD")
     w_github: float = Field(0.25, validation_alias="W_GITHUB")
