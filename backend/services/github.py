@@ -15,6 +15,7 @@ Nothing here raises out to the caller: failures become a status + error string.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import math
 from datetime import datetime, timezone
@@ -114,35 +115,125 @@ def _parse_ts(value: str | None) -> datetime | None:
         return None
 
 
+# --- repo selection: SUBSTANCE first, recency last -------------------------
+#
+# Methodology (defensible per §7 "GitHub analysis methodology"):
+#
+#   The job of this function is only to decide *which* repos the LLM reads in
+#   depth. An earlier version weighted recency 0.40 and picked the three newest
+#   repos; for accounts whose strongest work is a semester old (the common
+#   student case) that surfaced throwaway repos — one had a README of just
+#   "# X / BTECH PROJECT" — and starved the model of the real projects, which
+#   then scored technical_relevance far too low. "How recently did they push"
+#   is already measured by days_since_last_push in GitHubStats and belongs to
+#   activity_consistency; it must not decide what gets read.
+#
+#   1. SUBSTANCE GATE. A repo must show at least one concrete sign that real
+#      work exists. Gate-passers ALWAYS rank above gate-failers, so a fresh
+#      2-line-README stub can never displace a substantive project.
+#   2. WEIGHTED RANK within each tier:
+#         substance 0.50   description text + README size + repo size
+#         signal    0.30   stars (others found it useful) + repo size
+#         recency   0.20   tie-breaker only, ~3-year linear decay
+#   3. BREADTH. Once a language has two picks, a *near-tied* repo (within a
+#      tight DIVERSITY_TOL) in another language is taken ahead of a third repo
+#      in the same language. The tolerance is deliberately small: breadth only
+#      breaks genuine ties — a clearly more substantive repo is never displaced
+#      for language variety.
+#
+# README byte size (``_readme_bytes``) is attached upstream by _gather_raw via a
+# cheap probe; when absent (old cache) the gate falls back to description/stars/
+# size and still works.
+
+_SUBSTANCE_W, _SIGNAL_W, _RECENCY_W = 0.50, 0.30, 0.20
+_GATE_MIN_DESC_CHARS = 40
+_GATE_MIN_README_BYTES = 200
+_GATE_MIN_SIZE_KB = 40  # a repo with only a README / config is a few KB
+_DIVERSITY_TOL = 0.05  # breadth breaks genuine ties only, not clear winners
+
+
+def _repo_signals(repo: dict[str, Any], now: datetime) -> tuple[float, float, float]:
+    """Return ``(substance, signal, recency)`` each in 0..1."""
+    desc = (repo.get("description") or "").strip()
+    readme_bytes = int(repo.get("_readme_bytes", 0) or 0)
+    size_kb = max(0, repo.get("size", 0))
+
+    size_sig = min(1.0, math.log1p(size_kb) / math.log1p(50_000))
+    writeup = max(min(1.0, len(desc) / 200.0), min(1.0, readme_bytes / 2000.0))
+    substance = 0.6 * writeup + 0.4 * size_sig
+
+    stars_sig = min(1.0, math.log1p(max(0, repo.get("stargazers_count", 0))) / math.log1p(50))
+    signal = 0.7 * stars_sig + 0.3 * size_sig
+
+    pushed = _parse_ts(repo.get("pushed_at"))
+    recency = max(0.0, 1.0 - (now - pushed).days / 1095.0) if pushed else 0.0
+    return substance, signal, recency
+
+
+def _passes_substance_gate(repo: dict[str, Any]) -> bool:
+    desc = (repo.get("description") or "").strip()
+    return (
+        len(desc) > _GATE_MIN_DESC_CHARS
+        or int(repo.get("_readme_bytes", 0) or 0) > _GATE_MIN_README_BYTES
+        or repo.get("stargazers_count", 0) > 0
+        or repo.get("size", 0) > _GATE_MIN_SIZE_KB
+    )
+
+
 def select_top_repos(repos: list[dict[str, Any]], n: int = TOP_N) -> list[dict[str, Any]]:
-    """Drop forks, then rank the originals by a transparent weighted heuristic.
+    """Pick the ``n`` original repos most likely to reflect real ability.
 
-    Forks are removed entirely — they are someone else's work. Each remaining
-    repo gets a 0..1 score from four sub-signals, combined as:
-
-        0.40  recency    linear decay of ``pushed_at`` over ~2 years (0 after)
-        0.30  stars      ``log1p(stargazers_count)`` scaled against ~1000
-        0.20  substance  ``log1p(size KB)`` scaled against ~100 MB
-        0.10  described  1.0 if it has a non-empty description, else 0.0
-
-    Recency is weighted highest because a recently-touched original repo is the
-    best single signal that the account reflects current ability.
+    Pure function (no I/O). See the methodology comment above for the weighting
+    rationale: forks dropped, a substance gate, then a substance-led blend in
+    which recency is only a tie-breaker, then a breadth preference.
     """
-    originals = [r for r in repos if not r.get("fork", False)]
+    # Drop forks and the special <username>/<username> profile-README repo — the
+    # latter is a CV blurb, not repository work, and its large README would let
+    # it sail through the substance gate.
+    originals = [
+        r
+        for r in repos
+        if not r.get("fork", False)
+        and (r.get("name") or "").lower() != (r.get("owner") or {}).get("login", "").lower()
+    ]
     if not originals:
         return []
 
     now = datetime.now(timezone.utc)
+    scored: list[tuple[dict[str, Any], bool, float]] = []
+    for repo in originals:
+        substance, signal, recency = _repo_signals(repo, now)
+        blended = _SUBSTANCE_W * substance + _SIGNAL_W * signal + _RECENCY_W * recency
+        scored.append((repo, _passes_substance_gate(repo), blended))
 
-    def rank(repo: dict[str, Any]) -> float:
-        pushed = _parse_ts(repo.get("pushed_at"))
-        recency = max(0.0, 1.0 - (now - pushed).days / 730.0) if pushed else 0.0
-        stars = min(1.0, math.log1p(max(0, repo.get("stargazers_count", 0))) / math.log1p(1000))
-        substance = min(1.0, math.log1p(max(0, repo.get("size", 0))) / math.log1p(100_000))
-        described = 1.0 if (repo.get("description") or "").strip() else 0.0
-        return 0.40 * recency + 0.30 * stars + 0.20 * substance + 0.10 * described
+    scored.sort(key=lambda t: (t[1], t[2]), reverse=True)  # gate-pass first, then blend
 
-    return sorted(originals, key=rank, reverse=True)[:n]
+    picked: list[dict[str, Any]] = []
+    lang_count: dict[str, int] = {}
+    pending = scored[:]
+    while pending and len(picked) < n:
+        repo, gate, blended = pending[0]
+        lang = (repo.get("language") or "").lower()
+        if gate and lang and lang_count.get(lang, 0) >= 2:
+            alt = next(
+                (
+                    t
+                    for t in pending[1:]
+                    if t[1]
+                    and (t[0].get("language") or "").lower() != lang
+                    and t[2] >= blended - _DIVERSITY_TOL
+                ),
+                None,
+            )
+            if alt is not None:
+                repo, gate, blended = alt
+                lang = (repo.get("language") or "").lower()
+        pending = [t for t in pending if t[0] is not repo]
+        picked.append(repo)
+        if lang:
+            lang_count[lang] = lang_count.get(lang, 0) + 1
+
+    return picked
 
 
 def compute_stats(
@@ -205,6 +296,21 @@ async def fetch_repos(client: httpx.AsyncClient, username: str) -> list[dict[str
     )
     resp.raise_for_status()
     return resp.json()
+
+
+@_retry_http
+async def probe_readme_size(
+    client: httpx.AsyncClient, owner: str, repo: str
+) -> int:
+    """README byte size for one repo (0 if none). One cheap call, no decode.
+
+    Feeds the substance gate in :func:`select_top_repos` so a repo whose write-up
+    lives in the README (not the description) is not mistaken for a stub.
+    """
+    resp = await client.get(f"{GITHUB_API}/repos/{owner}/{repo}/readme", headers=_headers())
+    if resp.status_code == 200:
+        return int(resp.json().get("size", 0) or 0)
+    return 0
 
 
 @_retry_http
@@ -280,6 +386,15 @@ async def _gather_raw(
         return payload
 
     repos = await fetch_repos(client, username)
+
+    # Probe README size for every original repo BEFORE ranking, so the substance
+    # gate can see write-ups that live in the README rather than the description.
+    originals = [r for r in repos if not r.get("fork", False)]
+    sizes = await asyncio.gather(
+        *(probe_readme_size(client, username, r["name"]) for r in originals)
+    )
+    for repo, size in zip(originals, sizes):
+        repo["_readme_bytes"] = size
     payload["repos"] = repos
 
     details: dict[str, Any] = {}
