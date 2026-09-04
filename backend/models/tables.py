@@ -122,12 +122,19 @@ class Evaluation(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     candidate_id: int = Field(foreign_key="candidate.candidate_id", index=True)
     job_id: int = Field(foreign_key="job_description.job_id", index=True)
+    run_id: int | None = Field(
+        default=None, foreign_key="pipeline_run.run_id", index=True
+    )
     resume_eval: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     github_eval: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     weights: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     model_used: str | None = None
-    pre_test_score: float | None = None
-    final_score: float | None = None
+    resume_score: float | None = None  # 0-100, None when resume eval failed
+    github_score: float | None = None  # 0-100, None when no/failed GitHub
+    github_status: str | None = None  # GitHubStatus value
+    status: str | None = None  # scored | partial (...) | unscorable
+    pre_test_score: float | None = None  # blended; None when unscorable (Phase 5)
+    final_score: float | None = None  # after test results (Phase 7)
     errors: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
 
@@ -167,7 +174,11 @@ class PipelineRun(SQLModel, table=True):
     run_id: int | None = Field(default=None, primary_key=True)
     batch_id: int = Field(foreign_key="upload_batch.batch_id", index=True)
     job_id: int | None = None
-    status: str = "pending"
+    status: str = "pending"  # pending -> running -> completed | failed
+    mode: str | None = None  # EVALUATION_MODE profile: fast | quality
     processed: int = 0
     total: int = 0
+    weights: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    errors: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
+    finished_at: datetime | None = None

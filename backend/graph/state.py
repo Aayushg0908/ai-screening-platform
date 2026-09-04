@@ -1,8 +1,9 @@
-"""Shared state for the candidate evaluation graph.
+"""Shared state for the per-candidate evaluation graph (§4.5).
 
-``evaluate_vs_jd`` and ``analyze_github`` run in parallel and both append to
-``errors``; the ``operator.add`` reducer merges their writes instead of raising
-a concurrent-update error.
+``evaluate_vs_jd`` and ``analyze_github`` fan out from ``load_resume`` and run
+concurrently; both may append to ``errors``, so it carries an ``operator.add``
+reducer that merges the two branches' writes instead of raising a concurrent
+update error. Everything else is scalar and written by exactly one node.
 """
 
 from __future__ import annotations
@@ -10,17 +11,16 @@ from __future__ import annotations
 import operator
 from typing import Annotated, TypedDict
 
-from backend.models.schemas import FinalScore, GitHubEvaluation, ResumeEvaluation
-from backend.models.tables import Candidate, JobDescription
-
 
 class CandidateState(TypedDict, total=False):
-    """State threaded through the per-candidate pipeline."""
+    """State threaded through one candidate's evaluation."""
 
-    candidate: Candidate
-    jd: JobDescription
-    resume_text: str
-    resume_eval: ResumeEvaluation
-    github_eval: GitHubEvaluation
-    final: FinalScore
+    candidate_id: int
+    job_id: int
+    resume_text: str | None
+    resume_eval: dict | None  # ResumeEvaluation, dumped
+    github_eval: dict | None  # GitHubEvaluationOut, dumped
+    resume_score: float | None
+    github_score: float | None
+    pre_test_score: float | None
     errors: Annotated[list[str], operator.add]

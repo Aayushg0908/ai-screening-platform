@@ -47,8 +47,12 @@ logger = get_logger(__name__)
 
 GITHUB_API = "https://api.github.com"
 TOP_N = 3
-README_TRUNCATE = 3000
 HTTP_TIMEOUT = 20.0
+
+
+def _readme_truncate() -> int:
+    """Per-repo README character cap sent to the LLM (config-tunable)."""
+    return get_settings().github_readme_max_chars
 
 GITHUB_PROMPT = """\
 You are evaluating a candidate's GitHub work against a job description.
@@ -333,7 +337,9 @@ async def fetch_repo_detail(
     if readme_resp.status_code == 200:
         try:
             raw = base64.b64decode(readme_resp.json().get("content", ""))
-            readme_text = raw.decode("utf-8", errors="replace")[:README_TRUNCATE]
+            # Cache with headroom; the LLM-facing cap is applied at prompt build
+            # time (github_readme_max_chars) so it can be tuned without a refetch.
+            readme_text = raw.decode("utf-8", errors="replace")[:8000]
             has_readme = True
         except Exception:  # noqa: BLE001 - malformed base64 -> treat as no README
             readme_text = None
@@ -441,8 +447,9 @@ def _build_user_prompt(
             f"languages: {', '.join((detail.get('languages') or {}).keys()) or '(none)'}",
         ]
         if detail.get("has_readme"):
-            lines.append(f"README (truncated to {README_TRUNCATE} chars):")
-            lines.append(detail["readme"])
+            cap = _readme_truncate()
+            lines.append(f"README (truncated to {cap} chars):")
+            lines.append((detail.get("readme") or "")[:cap])
         else:
             lines.append("README: (none — this repo has no README)")
     lines += ["", "--- END REPOSITORIES ---", "", "Score the four dimensions now."]
@@ -578,6 +585,18 @@ async def analyze_candidate(
             **ident, username=username, status=GitHubStatus.ERROR,
             stats=stats, model_used=llm.model_used,
             error=f"github LLM failed: {type(exc).__name__}: {exc}",
+        )
+        _persist(session, candidate_id, job_id, out)
+        return out
+
+    if evaluation is None:
+        logger.error(
+            "candidate %s: GitHub LLM returned no response after retries", candidate_id
+        )
+        out = GitHubEvaluationOut(
+            **ident, username=username, status=GitHubStatus.ERROR,
+            stats=stats, model_used=llm.model_used,
+            error="LLM returned no response after retries",
         )
         _persist(session, candidate_id, job_id, out)
         return out

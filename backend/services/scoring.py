@@ -20,13 +20,9 @@ GITHUB_WEIGHTS: dict[str, float] = {
     "engineering_practice": 0.15,
 }
 
-#: Pre-test blend weights per input component (must sum to 1.0). See CLAUDE.md.
-PRETEST_WEIGHTS: dict[str, float] = {
-    "resume": 0.40,
-    "github": 0.25,
-    "projects": 0.20,
-    "academics": 0.15,
-}
+#: Default pre-test blend: resume score vs GitHub score. Config overrides this
+#: (settings.pretest_blend); /rerank overrides it per request.
+PRETEST_BLEND: dict[str, float] = {"resume": 0.60, "github": 0.40}
 
 
 def compute_resume_score(ev: ResumeEvaluation, w: ScoreWeights) -> float:
@@ -62,28 +58,97 @@ def compute_github_score(
     return round(weighted * 10, 2)
 
 
-def combine_pretest_score(
-    scores: dict[str, float | None], weights: dict[str, float] = PRETEST_WEIGHTS
-) -> float:
-    """Blend component scores (each 0-100) into one 0-100 pre-test score.
+def compute_pre_test_score(
+    resume_score: float | None,
+    github_score: float | None,
+    weights: dict[str, float] = PRETEST_BLEND,
+) -> float | None:
+    """Blend the 0-100 resume and GitHub scores into one 0-100 pre-test score.
 
-    DELIBERATE DESIGN DECISION — a missing input is NOT a zero. When a
-    component's score is ``None`` (the common case: ``github`` for a candidate
-    who never provided a GitHub link), that component is dropped and its weight
-    is redistributed *proportionally* across the components that do have a
-    score; the surviving weights are renormalised to sum to 1.0 (i.e. to 100%).
+    Both present::   w_resume * resume_score + w_github * github_score
+                     (weights renormalised to sum to 1.0 first)
+    Only one present::  that score alone, renormalised to 100.
+    Neither present::   ``None`` — the candidate is unscorable.
 
-    A candidate who submitted no GitHub link is therefore judged on the inputs
-    they did provide — neither penalised with a 0 nor credited for work they
-    never showed. This is not a fallback or an error path; it is how absent
-    inputs are meant to be handled in the aggregate score.
+    DELIBERATE DESIGN DECISION — ``None`` is a missing input, NEVER a zero. It
+    applies symmetrically:
+
+    * No GitHub (status NO_PROFILE / NOT_FOUND / EMPTY): four of ten sample
+      candidates never provided a link. The GitHub weight is redistributed onto
+      the resume — judged on their resume alone, neither penalised nor credited.
+    * Resume evaluation failed (e.g. a transient LLM rate limit) but GitHub
+      succeeded: the resume weight is redistributed onto GitHub. A rate limit
+      must not bury an otherwise strong candidate at the bottom of a shortlist.
+    * Both failed: ``None`` — surfaced separately as unscorable, not ranked.
+
+    A zero would say "we assessed this and it is bad". ``None`` says "we could
+    not assess this part" — a categorically different thing for a hiring list.
     """
-    present = {k: v for k, v in scores.items() if v is not None}
-    if not present:
-        return 0.0
-    active_weight = sum(weights.get(k, 0.0) for k in present)
-    if active_weight <= 0:
-        return 0.0
+    if resume_score is None and github_score is None:
+        return None
+    if github_score is None:
+        return round(resume_score, 2)
+    if resume_score is None:
+        return round(github_score, 2)
+
+    w_resume = max(0.0, weights.get("resume", 0.60))
+    w_github = max(0.0, weights.get("github", 0.40))
+    total = w_resume + w_github
+    if total <= 0:
+        return round((resume_score + github_score) / 2, 2)
     return round(
-        sum(v * (weights[k] / active_weight) for k, v in present.items()), 2
+        (w_resume / total) * resume_score + (w_github / total) * github_score, 2
     )
+
+
+def rank_candidates(
+    evaluations: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Split into ``(ranked, unranked)``.
+
+    ``ranked`` — candidates with a non-``None`` ``pre_test_score``, sorted desc,
+    each given a 1-based ``rank`` (tie-break: ``candidate_id`` asc).
+
+    ``unranked`` — candidates whose ``pre_test_score`` is ``None`` (both the
+    resume and GitHub evaluation failed). They are deliberately kept OUT of the
+    ranking so a transient provider failure cannot bury a good candidate at
+    rank 10. Their ``rank`` is ``None``.
+
+    Pure: no LLM, no I/O, no DB. Plain dicts in and out, so the batch (fresh
+    scores) and ``/rerank`` (recomputed-from-stored scores) both reuse it.
+    """
+    items = [dict(ev) for ev in evaluations]
+    ranked = [ev for ev in items if ev.get("pre_test_score") is not None]
+    unranked = [ev for ev in items if ev.get("pre_test_score") is None]
+
+    ranked.sort(key=lambda ev: (-ev["pre_test_score"], ev["candidate_id"]))
+    for position, ev in enumerate(ranked, start=1):
+        ev["rank"] = position
+    for ev in unranked:
+        ev["rank"] = None
+
+    return ranked, unranked
+
+
+def evaluation_state(
+    resume_score: float | None,
+    github_score: float | None,
+    github_status: str | None,
+    pre_test_score: float | None,
+) -> str:
+    """One of ``scored`` / ``partial (resume failed)`` / ``partial (github failed)``
+    / ``unscorable`` — for the results output. Pure.
+
+    ``no_profile`` / ``not_found`` / ``empty`` GitHub is *absent*, not failed:
+    a resume-only score for such a candidate is still ``scored``.
+    """
+    github_absent = github_status in ("no_profile", "not_found", "empty")
+    if pre_test_score is None:
+        return "unscorable"
+    if resume_score is not None and (github_score is not None or github_absent):
+        return "scored"
+    if resume_score is None and github_score is not None:
+        return "partial (resume failed)"
+    if resume_score is not None and github_score is None and not github_absent:
+        return "partial (github failed)"
+    return "scored"

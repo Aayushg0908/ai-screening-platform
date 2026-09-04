@@ -9,19 +9,30 @@ Batch evaluation, ranking, and GitHub belong to Phase 4/5 and are not here.
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from sqlmodel import Session, select
+import asyncio
+from datetime import datetime, timezone
 
+from langchain_core.messages import HumanMessage, SystemMessage
+from sqlalchemy import update
+from sqlalchemy.exc import OperationalError
+from sqlmodel import Session, select
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from backend.core.config import get_settings
+from backend.core.db import engine
 from backend.core.logging import get_logger
 from backend.models.schemas import EvaluationOut, ResumeEvaluation, ScoreWeights
-from backend.models.tables import Candidate, Evaluation, JobDescription, ResumeText
+from backend.models.tables import (
+    Candidate,
+    Evaluation,
+    JobDescription,
+    PipelineRun,
+    ResumeText,
+)
 from backend.services import scoring
 from backend.services.llm import get_llm
 
 logger = get_logger(__name__)
-
-#: Resume text longer than this is truncated before the LLM call.
-MAX_RESUME_CHARS = 12_000
 
 EVALUATION_PROMPT = """\
 You are an experienced technical recruiter evaluating one candidate against
@@ -221,14 +232,15 @@ def evaluate_candidate(
             error=f"no evaluable material: {reason}",
         )
 
-    if has_resume and len(resume_text) > MAX_RESUME_CHARS:
+    max_resume_chars = get_settings().resume_max_chars
+    if has_resume and len(resume_text) > max_resume_chars:
         logger.info(
             "candidate %s: resume truncated %d -> %d chars",
             candidate_id,
             len(resume_text),
-            MAX_RESUME_CHARS,
+            max_resume_chars,
         )
-        resume_text = resume_text[:MAX_RESUME_CHARS]
+        resume_text = resume_text[:max_resume_chars]
 
     if not has_resume:
         logger.info(
@@ -281,6 +293,30 @@ def evaluate_candidate(
             error=f"LLM evaluation failed: {type(exc).__name__}: {exc}",
         )
 
+    if evaluation is None:
+        # structured-output call returned nothing parseable, on every provider
+        logger.error("candidate %s: LLM returned no response after retries", candidate_id)
+        _persist(
+            session,
+            candidate_id=candidate_id,
+            job_id=job_id,
+            evaluation=None,
+            resume_score=0.0,
+            weights=weights,
+            model_used=client.model_used,
+            error="LLM returned no response after retries",
+        )
+        return EvaluationOut(
+            candidate_id=candidate_id,
+            s_no=candidate.s_no,
+            name=candidate.name,
+            job_id=job_id,
+            weights=weights,
+            resume_score=0.0,
+            model_used=client.model_used,
+            error="LLM returned no response after retries",
+        )
+
     resume_score = scoring.compute_resume_score(evaluation, weights)
     _persist(
         session,
@@ -309,3 +345,325 @@ def evaluate_candidate(
         model_used=client.model_used,
         error=None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — batch orchestration
+# ---------------------------------------------------------------------------
+
+#: Per-candidate graph retries when a branch comes back with a transient LLM
+#: failure (rate limit, or a structured-output validation miss). Kept at 1: each
+#: retry re-runs the whole graph = two more LLM calls, and on the Groq free tier
+#: a candidate that retries repeatedly just keeps the token bucket empty for
+#: every candidate behind it.
+_TRANSIENT_RETRIES = 1
+
+_TRANSIENT_MARKERS = (
+    "429",
+    "rate limit",
+    "validationerror",
+    "field required",
+    "did not match schema",
+    "tool_use_failed",
+    "nonetype",
+    "operationalerror",  # Neon scale-to-zero / transient DNS
+    "could not translate host name",
+    "connection",
+    "timed out",
+)
+
+
+#: Bookkeeping DB writes retry through Neon's scale-to-zero cold starts and the
+#: transient DNS blips seen on this host.
+_db_retry = retry(
+    retry=retry_if_exception_type(OperationalError),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, max=15),
+    reraise=True,
+)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _has_transient_error(errors: list[str]) -> bool:
+    return any(
+        marker in err.lower() for err in errors for marker in _TRANSIENT_MARKERS
+    )
+
+
+def _find_or_create_run(
+    session: Session, batch_id: int, job_id: int, weights: ScoreWeights
+) -> PipelineRun:
+    """The newest pending run for this (batch, job), or a fresh one."""
+    run = session.exec(
+        select(PipelineRun)
+        .where(PipelineRun.batch_id == batch_id)
+        .where(PipelineRun.job_id == job_id)
+        .where(PipelineRun.status == "pending")
+        .order_by(PipelineRun.run_id.desc())
+    ).first()
+    if run is None:
+        run = PipelineRun(batch_id=batch_id, job_id=job_id, status="pending")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+    return run
+
+
+@_db_retry
+def _start_run(
+    batch_id: int, job_id: int, weights: ScoreWeights, mode: str
+) -> tuple[int, list[int]]:
+    """Claim the pending run, load its candidates, flip it to ``running``."""
+    with Session(engine) as session:
+        run = _find_or_create_run(session, batch_id, job_id, weights)
+        candidate_ids = [
+            c.candidate_id
+            for c in session.exec(
+                select(Candidate)
+                .where(Candidate.batch_id == batch_id)
+                .order_by(Candidate.s_no)
+            ).all()
+        ]
+        run.total = len(candidate_ids)
+        run.processed = 0
+        run.status = "running"
+        run.errors = []
+        run.weights = weights.model_dump()
+        run.mode = mode
+        session.add(run)
+        session.commit()
+        return run.run_id, candidate_ids
+
+
+@_db_retry
+def _persist_candidate(
+    run_id: int, job_id: int, candidate_id: int, weights: ScoreWeights, state: dict
+) -> None:
+    """Upsert one candidate's Evaluation row and bump the run's ``processed``.
+
+    Called the moment a candidate's graph completes, so a mid-batch crash keeps
+    every candidate finished so far.
+    """
+    with Session(engine) as session:
+        row = session.exec(
+            select(Evaluation)
+            .where(Evaluation.candidate_id == candidate_id)
+            .where(Evaluation.job_id == job_id)
+        ).first()
+        if row is None:
+            row = Evaluation(candidate_id=candidate_id, job_id=job_id)
+
+        row.run_id = run_id
+        if state.get("resume_eval") is not None:
+            row.resume_eval = state["resume_eval"]
+        row.github_eval = state.get("github_eval") or {}
+        row.weights = weights.model_dump()
+        row.resume_score = state.get("resume_score")
+        row.github_score = state.get("github_score")
+        row.github_status = (state.get("github_eval") or {}).get("status")
+        row.pre_test_score = state.get("pre_test_score")
+        row.status = scoring.evaluation_state(
+            row.resume_score, row.github_score, row.github_status, row.pre_test_score
+        )
+        row.errors = list(state.get("errors") or [])
+        session.add(row)
+
+        session.exec(
+            update(PipelineRun)
+            .where(PipelineRun.run_id == run_id)
+            .values(processed=PipelineRun.processed + 1)
+        )
+        session.commit()
+
+
+def run_batch_in_thread(
+    batch_id: int,
+    job_id: int,
+    weights: ScoreWeights | None = None,
+    force: bool = False,
+    mode: str | None = None,
+) -> None:
+    """Sync entrypoint for ``BackgroundTasks``.
+
+    ``run_batch`` is async and its graph nodes make blocking LLM / DB calls; run
+    inside the API's event loop those would starve request handling (status
+    polls would time out). Starlette runs a *sync* background task in a worker
+    thread, so this spins up its own event loop there — fully isolated from the
+    server's.
+    """
+    asyncio.run(run_batch(None, batch_id, job_id, weights, force, mode))
+
+
+async def run_batch(
+    session: Session | None,
+    batch_id: int,
+    job_id: int,
+    weights: ScoreWeights | None = None,
+    force: bool = False,
+    mode: str | None = None,
+) -> None:
+    """Evaluate every candidate in ``batch_id`` against ``job_id``. Never raises.
+
+    Runs the compiled graph once per candidate, ``settings.batch_concurrency``
+    at a time (default 1 — see the config note),
+    and persists each candidate's result (and increments ``PipelineRun.processed``)
+    the instant it finishes. ``PipelineRun.status`` walks
+    pending -> running -> completed, or -> failed only if the run infrastructure
+    itself breaks (a per-candidate error never fails the run).
+
+    The ``session`` argument is accepted for signature stability but not relied
+    on — a background task outlives the request session, so this opens its own.
+    """
+    from backend.graph.pipeline import GRAPH  # lazy: avoids an import cycle
+    from backend.services import llm as llm_pool
+
+    settings = get_settings()
+    weights = weights or ScoreWeights()
+    blend = settings.pretest_blend
+    concurrency = max(1, settings.batch_concurrency)
+
+    profile = settings.eval_profile(mode)
+    stagger = profile["stagger"]
+    llm_pool.set_cooldown_seconds(profile["cooldown"])
+    preemptive = bool(profile["preemptive_wait"])
+    preempt_cap = float(profile["preemptive_cap"])
+    run_id: int | None = None
+    try:
+        run_id, candidate_ids = _start_run(batch_id, job_id, weights, profile["mode"])
+
+        logger.info(
+            "run %s: batch %s vs job %s — %s candidates, mode=%s, concurrency %s, "
+            "stagger %ss, cooldown %ss, preemptive_wait=%s",
+            run_id,
+            batch_id,
+            job_id,
+            len(candidate_ids),
+            profile["mode"],
+            concurrency,
+            stagger,
+            profile["cooldown"],
+            preemptive,
+        )
+
+        if not candidate_ids:
+            _finish_run(run_id, "failed", ["batch has no candidates"])
+            return
+
+        semaphore = asyncio.Semaphore(concurrency)
+
+        # ``stagger`` exists SOLELY for Groq's per-minute token ceiling (8000 TPM
+        # per key), set by the EVALUATION_MODE profile. Each candidate fires its
+        # resume + GitHub LLM calls in PARALLEL and the key pool round-robins
+        # them onto *different* keys, so every candidate loads every key at once
+        # — the stagger governs per-key recovery and must NOT scale with pool
+        # size. In "quality" mode a pre-emptive wait (below) holds for a free
+        # Groq key rather than dropping to Mistral.
+        #
+        # NOTE: the sleep below is held INSIDE the semaphore. That is correct at
+        # concurrency 1 (it spaces the LLM calls), but at concurrency > 1 it
+        # would serialise the batch — move it outside the ``async with`` (or gate
+        # it on ``concurrency == 1``) before raising concurrency.
+        async def process(candidate_id: int) -> None:
+            async with semaphore:
+                if preemptive:
+                    free_in = llm_pool.groq_pool_free_in()
+                    if free_in > 0:
+                        wait = min(free_in, preempt_cap)
+                        logger.info(
+                            "run %s candidate %s: all Groq keys cooling, waiting "
+                            "%.0fs for a free key",
+                            run_id,
+                            candidate_id,
+                            wait,
+                        )
+                        await asyncio.sleep(wait)
+                        if free_in > preempt_cap:
+                            logger.warning(
+                                "run %s candidate %s: Groq pool still cooling after "
+                                "the %.0fs cap — falling through to Mistral",
+                                run_id,
+                                candidate_id,
+                                preempt_cap,
+                            )
+                state: dict = {}
+                for attempt in range(_TRANSIENT_RETRIES + 1):
+                    state = await _invoke_graph(
+                        GRAPH, candidate_id, job_id, weights, blend, force
+                    )
+                    if not _has_transient_error(state.get("errors") or []):
+                        break
+                    wait = 15 * (attempt + 1)
+                    logger.warning(
+                        "run %s candidate %s transient failure, retry in %ss: %s",
+                        run_id,
+                        candidate_id,
+                        wait,
+                        state.get("errors"),
+                    )
+                    await asyncio.sleep(wait)
+                _persist_candidate(run_id, job_id, candidate_id, weights, state)
+                logger.info(
+                    "run %s candidate %s done: pre_test=%s errors=%s",
+                    run_id,
+                    candidate_id,
+                    state.get("pre_test_score"),
+                    len(state.get("errors") or []),
+                )
+                # Drain Groq's per-minute token window before the next candidate.
+                # Held inside the semaphore so it actually spaces the LLM calls.
+                if stagger:
+                    await asyncio.sleep(stagger)
+
+        await asyncio.gather(*(process(cid) for cid in candidate_ids))
+        _finish_run(run_id, "completed", [])
+        logger.info("run %s: completed", run_id)
+    except Exception as exc:  # noqa: BLE001 - never raise out of a background task
+        logger.exception("run_batch crashed (run_id=%s)", run_id)
+        if run_id is not None:
+            _finish_run(run_id, "failed", [f"run_batch: {type(exc).__name__}: {exc}"])
+
+
+async def _invoke_graph(
+    graph,
+    candidate_id: int,
+    job_id: int,
+    weights: ScoreWeights,
+    blend: dict[str, float],
+    force: bool,
+) -> dict:
+    """One graph run for one candidate; a graph-level crash becomes an error dict."""
+    try:
+        return await graph.ainvoke(
+            {"candidate_id": candidate_id, "job_id": job_id, "errors": []},
+            config={
+                "configurable": {"weights": weights, "blend": blend, "force": force}
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("graph crashed for candidate %s", candidate_id)
+        return {
+            "candidate_id": candidate_id,
+            "resume_eval": None,
+            "github_eval": None,
+            "resume_score": None,
+            "github_score": None,
+            "pre_test_score": None,
+            "errors": [f"graph: {type(exc).__name__}: {exc}"],
+        }
+
+
+@_db_retry
+def _finish_run(run_id: int, status: str, errors: list[str]) -> None:
+    with Session(engine) as session:
+        run = session.get(PipelineRun, run_id)
+        if run is None:
+            return
+        run.status = status
+        run.finished_at = _utcnow()
+        if errors:
+            run.errors = list(run.errors or []) + errors
+        session.add(run)
+        session.commit()

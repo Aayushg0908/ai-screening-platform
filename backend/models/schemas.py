@@ -284,3 +284,83 @@ class GitHubEvaluationOut(BaseModel):
     github_score: float | None = None  # 0-100, None when status != OK
     model_used: str | None = None
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — batch evaluation, scoring and ranking (§4.5)
+# ---------------------------------------------------------------------------
+
+
+class BatchRequest(BaseModel):
+    """Body for ``POST /evaluate/batch``."""
+
+    batch_id: int
+    job_id: int
+    weights: ScoreWeights | None = None  # resume dimension weights
+    force: bool = False  # bypass the GitHub API cache
+    mode: str | None = None  # "fast" | "quality"; None => EVALUATION_MODE env
+
+
+class RunStatusOut(BaseModel):
+    """Polling view of a :class:`~backend.models.tables.PipelineRun`."""
+
+    run_id: int
+    status: str  # pending | running | completed | failed
+    mode: str | None = None
+    processed: int
+    total: int
+    errors: list[str] = Field(default_factory=list)
+
+
+class RunResultItem(BaseModel):
+    """One candidate in a run's results.
+
+    ``rank`` is ``None`` for unscorable candidates (both resume and GitHub
+    evaluation failed) — they are returned in ``RunResultsOut.unranked``.
+    ``status`` is one of: ``scored`` / ``partial (resume failed)`` /
+    ``partial (github failed)`` / ``unscorable``.
+    """
+
+    rank: int | None = None
+    candidate_id: int
+    s_no: int
+    name: str
+    status: str | None = None
+    model_used: str | None = None  # provider that produced the resume score
+    resume_score: float | None = None
+    github_score: float | None = None
+    pre_test_score: float | None = None
+    github_status: str | None = None
+    resume_eval: dict | None = None
+    github_eval: dict | None = None
+    errors: list[str] = Field(default_factory=list)
+
+
+class RunResultsOut(BaseModel):
+    """A run's results, split into ranked and unscorable candidates."""
+
+    run_id: int
+    mode: str | None = None  # which EVALUATION_MODE profile ran this batch
+    ranked: list[RunResultItem]
+    unranked: list[RunResultItem]  # pre_test_score None; not placed in the order
+
+
+class RerankWeights(BaseModel):
+    """Body for ``POST /evaluate/runs/{run_id}/rerank`` — recruiter weight tuning.
+
+    ``resume`` / ``github`` set the pre-test blend (renormalised internally);
+    ``dimensions`` optionally retunes the four resume sub-dimension weights.
+    Applied by recomputing from stored dimension scores — no LLM / GitHub calls.
+    """
+
+    resume: float = 0.60
+    github: float = 0.40
+    dimensions: ScoreWeights | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "RerankWeights":
+        if self.resume < 0 or self.github < 0:
+            raise ValueError("blend weights must be non-negative")
+        if self.resume + self.github <= 0:
+            raise ValueError("blend weights must sum to a positive value")
+        return self

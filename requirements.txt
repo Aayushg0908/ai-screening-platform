@@ -18,8 +18,8 @@ langchain
 langchain-core
 langchain-community
 langgraph
-langchain-groq            # primary: Groq openai/gpt-oss-120b (free, open-weights)
-langchain-mistralai       # fallback when Groq rate-limits / 5xx
+langchain-groq            # primary: a pool of Groq API keys, all gpt-oss-120b
+langchain-mistralai       # last-resort fallback when every Groq key is cooling
 
 # ---- Data ingest ----
 pandas

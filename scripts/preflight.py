@@ -64,23 +64,37 @@ def check_database() -> None:
         report("Postgres", False, str(exc)[:110])
 
 
+def _groq_keys() -> list[str]:
+    """GROQ_API_KEYS (comma-separated) plus the singular GROQ_API_KEY, deduped."""
+    keys: list[str] = []
+    for raw in (env("GROQ_API_KEYS") or "").split(","):
+        k = raw.strip()
+        if k and k not in keys:
+            keys.append(k)
+    single = env("GROQ_API_KEY")
+    if single and single not in keys:
+        keys.append(single)
+    return keys
+
+
 def check_groq() -> None:
-    key = env("GROQ_API_KEY")
-    if not key:
-        return report("Groq LLM", False, "GROQ_API_KEY not set")
+    keys = _groq_keys()
+    if not keys:
+        return report("Groq LLM", False, "no GROQ_API_KEYS / GROQ_API_KEY set")
     try:
         from langchain_groq import ChatGroq
 
-        llm = ChatGroq(
-            model=env("GROQ_MODEL") or "openai/gpt-oss-20b",
-            api_key=key,
-            temperature=0,
-            max_tokens=16,
+        model_id = env("GROQ_MODEL") or "openai/gpt-oss-120b"
+        for i, k in enumerate(keys):
+            llm = ChatGroq(
+                model=model_id, api_key=k, temperature=0, max_tokens=16, max_retries=0
+            )
+            llm.invoke("Reply with exactly: OK")
+        report(
+            "Groq LLM pool", True, f"{len(keys)} key(s), all responding — {model_id}"
         )
-        out = llm.invoke("Reply with exactly: OK").content.strip()
-        report("Groq LLM", True, f"responded: {out[:30]!r}")
     except Exception as exc:
-        report("Groq LLM", False, str(exc)[:110])
+        report("Groq LLM pool", False, f"{len(keys)} key(s); {str(exc)[:90]}")
 
 
 def check_mistral() -> None:
