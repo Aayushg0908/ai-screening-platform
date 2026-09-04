@@ -1,9 +1,9 @@
 """Streamlit entry point.
 
-Thin UI only — all HTTP goes through :mod:`frontend.lib.api_client`, and this
-package never imports from ``backend``. Streamlit auto-discovers the numbered
-modules in ``pages/`` for the sidebar; this file adds the app title and a
-backend health indicator.
+Thin UI only - all HTTP goes through :mod:`lib.api_client`, and this package
+never imports from ``backend``. Streamlit auto-discovers the numbered modules
+in ``pages/`` for the sidebar; this file adds the title, a backend health
+badge, and the session-wide pipeline state.
 
 Run with::
 
@@ -20,42 +20,54 @@ from lib.api_client import ApiError, get_client
 
 st.set_page_config(page_title="AI Screening Platform", page_icon="🧑‍💻", layout="wide")
 
+# Pipeline state shared across every page. Each page must degrade gracefully
+# (show guidance, not a KeyError) when a prior step hasn't run yet.
+for _key in ("batch_id", "job_id", "run_id"):
+    st.session_state.setdefault(_key, None)
 
-def render_health() -> None:
-    """Show a backend connectivity badge in the sidebar."""
-    with st.sidebar:
-        st.subheader("Backend")
-        try:
-            health = get_client().health()
-        except ApiError as exc:
-            st.error(f"Unreachable\n\n{exc}")
-            return
-        db_ok = bool(health.get("db"))
-        st.success("API: ok")
-        (st.success if db_ok else st.warning)(f"DB: {'ok' if db_ok else 'down'}")
+st.title("AI Screening Platform")
+st.caption(
+    "Ingest a candidate dataset, evaluate against a job description with an "
+    "LLM, analyse GitHub at repository level, score and rank, email a test "
+    "link, ingest results, and schedule interviews with a real Google Meet "
+    "link."
+)
 
+client = get_client()
+try:
+    health = client.health()
+except ApiError as exc:
+    st.error(f"Backend unreachable at {client.base_url}: {exc}")
+else:
+    api_ok = health.get("status") == "ok"
+    db_ok = bool(health.get("db"))
+    if api_ok and db_ok:
+        st.success(f"Backend OK ({client.base_url}) - database reachable.")
+    elif api_ok:
+        st.warning(f"Backend OK ({client.base_url}) - database NOT reachable.")
+    else:
+        st.error(f"Backend reported an unhealthy status: {health}")
 
-def main() -> None:
-    """Render the landing page."""
-    st.title("AI Screening Platform")
-    st.caption(
-        "Ingest candidates, evaluate against a job description, rank, send tests, "
-        "and schedule interviews."
-    )
-    render_health()
-    st.markdown(
-        """
-        **Workflow**
+st.divider()
+st.subheader("Current session")
+c1, c2, c3 = st.columns(3)
+c1.metric("Candidate batch", st.session_state["batch_id"] or "—")
+c2.metric("Job description", st.session_state["job_id"] or "—")
+c3.metric("Evaluation run", st.session_state["run_id"] or "—")
 
-        1. **Upload Candidates** — ingest the candidate dataset.
-        2. **Job Description** — define the role to screen against.
-        3. **Evaluation** — run the LLM + GitHub pipeline.
-        4. **Rankings** — review explainable scores and the shortlist.
-        5. **Test Results** — upload results and email the test link.
-        6. **Interviews** — schedule calendar invites with Meet links.
-        """
-    )
+st.markdown(
+    """
+    ### Workflow
 
+    Use the sidebar to move through the pipeline in order - each page picks
+    up `batch_id` / `job_id` / `run_id` from the step before it automatically.
 
-if __name__ == "__main__":
-    main()
+    1. **Upload Candidates** — ingest the candidate dataset (CSV/XLSX).
+    2. **Job Description** — define or pick the role to screen against.
+    3. **Evaluation** — run the LLM + GitHub analysis pipeline.
+    4. **Rankings** — explainable scores and weight tuning / reranking.
+    5. **Outreach** — preview and email the test link to the shortlist.
+    6. **Test Results** — upload results and blend them into a final score.
+    7. **Interviews** — schedule real Google Calendar events with Meet links.
+    """
+)
