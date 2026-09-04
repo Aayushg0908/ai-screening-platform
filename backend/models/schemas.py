@@ -439,3 +439,114 @@ class EmailLogOut(BaseModel):
     sent_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — test results ingest and final (post-test) scoring (§4.7)
+# ---------------------------------------------------------------------------
+
+
+class ResultsReport(BaseModel):
+    """What POST /results/upload returns.
+
+    A test-results upload is authoritative and complete for its batch: every
+    candidate in the batch gets exactly one outcome - matched (RECEIVED) or
+    no_result (absent from the file, e.g. s_no 4 and 10) - and a row present
+    in the file but absent from the batch (e.g. s_no 99) is skipped rather
+    than creating an orphan.
+    """
+
+    batch_id: int
+    filename: str
+    sheet: str | None = None
+    available_sheets: list[str] = Field(default_factory=list)
+    matched: int
+    no_result: int
+    skipped_unknown: int
+    column_mapping: dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TestResultOut(BaseModel):
+    id: int
+    candidate_id: int
+    s_no: int
+    name: str
+    test_la: float | None
+    test_code: float | None
+    status: str
+    created_at: datetime
+
+
+class FinalWeights(BaseModel):
+    """Recruiter-adjustable blend of the pre-test score with the two test
+    components. Same pattern as :class:`ScoreWeights` - overridable per
+    request, persisted alongside the score it produced so it stays
+    reproducible."""
+
+    pre_test: float = 0.60
+    test_la: float = 0.20
+    test_code: float = 0.20
+
+    @model_validator(mode="after")
+    def _normalise(self) -> "FinalWeights":
+        values = (self.pre_test, self.test_la, self.test_code)
+        if any(v < 0 for v in values):
+            raise ValueError("final weights must be non-negative")
+        total = sum(values)
+        if total <= 0:
+            raise ValueError("final weights must sum to a positive value")
+        if abs(total - 1.0) > 1e-6:
+            self.pre_test /= total
+            self.test_la /= total
+            self.test_code /= total
+        return self
+
+
+class FinalShortlistRequest(BaseModel):
+    """Body for ``POST /results/shortlist``.
+
+    Recomputes final scores from STORED pre_test_score + TestResult rows -
+    zero LLM calls, zero GitHub calls. The recruiter's weight-tuning path for
+    the final list, exactly like ``POST /evaluate/runs/{run_id}/rerank`` is
+    for the pre-test blend.
+    """
+
+    run_id: int
+    weights: FinalWeights | None = None
+    mode: Literal["top_n", "threshold"] = "top_n"
+    top_n: int = 5
+    threshold: float = 60.0
+
+
+class FinalResultItem(BaseModel):
+    """One candidate in the final (post-test) results.
+
+    ``rank`` is ``None`` for ``awaiting_result`` and ``unscorable`` candidates
+    - they are returned separately, never interleaved into the ranked order.
+    ``note`` explains a weight redistribution when exactly one test score is
+    missing.
+    """
+
+    rank: int | None = None
+    candidate_id: int
+    s_no: int
+    name: str
+    pre_test_score: float | None = None
+    test_la: float | None = None
+    test_code: float | None = None
+    final_score: float | None = None
+    status: str  # "scored" | "awaiting_result" | "unscorable"
+    note: str | None = None
+
+
+class FinalResultsOut(BaseModel):
+    """Response for ``POST /results/shortlist``."""
+
+    run_id: int
+    weights: FinalWeights
+    criterion: str  # human readable, e.g. "top 5" / "score >= 60"
+    ranked: list[FinalResultItem]  # every scored candidate, desc by final_score
+    shortlisted: list[FinalResultItem]  # the mode/top_n|threshold subset of ranked
+    awaiting_result: list[FinalResultItem]
+    unscorable: list[FinalResultItem]

@@ -28,9 +28,24 @@ engine = create_engine(
 )
 
 
+#: Additive migrations for columns added to a table that already existed in a
+#: prior phase - ``create_all`` only creates missing TABLES, never missing
+#: COLUMNS on one it finds. There is no Alembic in this project, so new
+#: columns on an existing table are added here, once, guarded by
+#: ``IF NOT EXISTS`` so re-running is a no-op. Never a DROP - the run_id=1
+#: stored demo data must survive every deploy.
+_COLUMN_MIGRATIONS: list[str] = [
+    # Phase 7 (§4.7): final (post-test) score, its weights, and status/note.
+    "ALTER TABLE evaluation ADD COLUMN IF NOT EXISTS final_weights JSONB DEFAULT '{}'::jsonb",
+    "ALTER TABLE evaluation ADD COLUMN IF NOT EXISTS final_status VARCHAR",
+    "ALTER TABLE evaluation ADD COLUMN IF NOT EXISTS final_note VARCHAR",
+]
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
 def init_db() -> None:
-    """Create any missing tables. Retries transient Neon cold-start failures.
+    """Create any missing tables and apply additive column migrations.
+    Retries transient Neon cold-start failures.
 
     Importing :mod:`backend.models.tables` for its side effect registers every
     table on :class:`SQLModel.metadata` before ``create_all`` runs.
@@ -39,6 +54,9 @@ def init_db() -> None:
 
     logger.info("Initialising database schema")
     SQLModel.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for statement in _COLUMN_MIGRATIONS:
+            conn.execute(text(statement))
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))

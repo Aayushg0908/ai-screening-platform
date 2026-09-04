@@ -135,6 +135,11 @@ class Evaluation(SQLModel, table=True):
     status: str | None = None  # scored | partial (...) | unscorable
     pre_test_score: float | None = None  # blended; None when unscorable (Phase 5)
     final_score: float | None = None  # after test results (Phase 7)
+    final_weights: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON)
+    )  # FinalWeights used to produce final_score - reproducible on demand
+    final_status: str | None = None  # scored | awaiting_result | unscorable
+    final_note: str | None = None  # e.g. a redistributed-weight explanation
     errors: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
 

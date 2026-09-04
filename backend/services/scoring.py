@@ -130,6 +130,131 @@ def rank_candidates(
     return ranked, unranked
 
 
+#: Default final blend: pre-test score vs the two post-test components.
+FINAL_WEIGHTS_DEFAULT: dict[str, float] = {
+    "pre_test": 0.60,
+    "test_la": 0.20,
+    "test_code": 0.20,
+}
+
+
+def _clip_test_score(raw: float | None) -> float | None:
+    """Normalise a raw test mark onto 0-100. ``None`` (no result) passes
+    through unchanged - it is a missing input, never a zero."""
+    if raw is None:
+        return None
+    return round(max(0.0, min(100.0, float(raw))), 2)
+
+
+def compute_final_score(
+    pre_test: float | None,
+    test_la: float | None,
+    test_code: float | None,
+    weights: dict[str, float] = FINAL_WEIGHTS_DEFAULT,
+) -> float | None:
+    """Blend the pre-test score with the two test components into 0-100.
+
+    ``None`` is a missing input, never a zero — the same principle already
+    applied to :func:`compute_pre_test_score`:
+
+    * No pre-test score (candidate was unscorable in Phase 5) -> ``None``.
+    * Neither test score present (candidate absent from the results upload,
+      e.g. s_no 4 and 10) -> ``None``. The caller reports this as
+      AWAITING_RESULT — the candidate keeps their pre_test_score for display
+      but is not ranked against candidates who did take the test.
+    * Exactly one test score present -> the missing component's weight is
+      redistributed onto the OTHER test component only (never onto
+      pre_test), so a candidate missing one test score is neither penalised
+      nor accidentally over-weighted on pre_test.
+    """
+    if pre_test is None:
+        return None
+
+    la = _clip_test_score(test_la)
+    code = _clip_test_score(test_code)
+    if la is None and code is None:
+        return None
+
+    w_pre = max(0.0, weights.get("pre_test", 0.60))
+    w_la = max(0.0, weights.get("test_la", 0.20))
+    w_code = max(0.0, weights.get("test_code", 0.20))
+
+    if la is None:
+        w_code += w_la
+        w_la = 0.0
+    elif code is None:
+        w_la += w_code
+        w_code = 0.0
+
+    total = w_pre + w_la + w_code
+    if total <= 0:
+        return round(pre_test, 2)
+
+    return round(
+        (w_pre / total) * pre_test
+        + (w_la / total) * (la or 0.0)
+        + (w_code / total) * (code or 0.0),
+        2,
+    )
+
+
+def final_score_note(test_la: float | None, test_code: float | None) -> str | None:
+    """Human-readable note when a test component's weight was redistributed
+    onto the other. ``None`` when both scores are present, or when neither is
+    (that case is AWAITING_RESULT, not a redistribution)."""
+    if test_la is None and test_code is None:
+        return None
+    if test_la is None:
+        return "test_la missing - its weight was redistributed onto test_code"
+    if test_code is None:
+        return "test_code missing - its weight was redistributed onto test_la"
+    return None
+
+
+def final_evaluation_state(
+    pre_test_score: float | None,
+    test_la: float | None,
+    test_code: float | None,
+) -> str:
+    """One of ``scored`` / ``awaiting_result`` / ``unscorable`` for the final
+    (post-test) results output. Pure."""
+    if pre_test_score is None:
+        return "unscorable"
+    if test_la is None and test_code is None:
+        return "awaiting_result"
+    return "scored"
+
+
+def rank_by_final_score(
+    evaluations: list[dict],
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Split into ``(ranked, awaiting_result, unscorable)`` by ``final_status``.
+
+    Mirrors :func:`rank_candidates` but for the post-test blend: a candidate
+    with no test result yet must never be ranked alongside a fully-scored one
+    — that would silently reward (or punish) a pending result with a blank
+    final_score sorting ambiguously among real scores.
+
+    Pure: plain dicts in and out, each carrying ``final_status`` and
+    ``final_score``. Reused by both a fresh recompute and any future re-run
+    against stored scores.
+    """
+    items = [dict(ev) for ev in evaluations]
+    ranked = [ev for ev in items if ev.get("final_status") == "scored"]
+    awaiting = [ev for ev in items if ev.get("final_status") == "awaiting_result"]
+    unscorable = [ev for ev in items if ev.get("final_status") == "unscorable"]
+
+    ranked.sort(key=lambda ev: (-(ev["final_score"] or 0.0), ev["candidate_id"]))
+    for position, ev in enumerate(ranked, start=1):
+        ev["rank"] = position
+    for ev in awaiting:
+        ev["rank"] = None
+    for ev in unscorable:
+        ev["rank"] = None
+
+    return ranked, awaiting, unscorable
+
+
 def evaluation_state(
     resume_score: float | None,
     github_score: float | None,
