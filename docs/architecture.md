@@ -128,13 +128,30 @@ config and infrastructure, not a rewrite.
   (embarrassingly parallel). Today they run in-process a few at a time; the
   next step is a job queue (Arq / Celery / RQ) with a worker pool that scales
   on batch size.
-- **LLM capacity** — add keys to `GROQ_API_KEYS` (the pool picks them up with
-  no code change); on a paid tier set `BATCH_STAGGER_SECONDS=0` and raise
-  `BATCH_CONCURRENCY` and the pipeline runs fully parallel with no fallback.
+- **Paid LLM instead of the free tier** — the whole `fast`/`quality` split,
+  the inter-candidate stagger, and the Mistral fallback exist only to survive
+  Groq's free 8000 TPM ceiling. On a paid plan (Groq, or an OpenAI/Anthropic
+  endpoint behind the same `services/llm.py` factory) that ceiling is gone:
+  set `BATCH_STAGGER_SECONDS=0`, raise `BATCH_CONCURRENCY`, and every
+  candidate is scored by the primary model in parallel with no fallback.
+- **Lower latency** — actual inference for a 10-candidate batch is ~90s; the
+  rest is deliberate throttling that a paid tier removes. Beyond that: run a
+  candidate's two LLM calls (resume + GitHub) concurrently instead of letting
+  the second wait; keep the backend warm on a paid host (no Render cold
+  start); co-locate the DB in the backend's region; widen the GitHub/resume
+  caches with a TTL so re-runs skip the network entirely; and stream
+  per-candidate results to the UI as each finishes (already partly done)
+  rather than waiting for the batch.
 - **GitHub** — already cached per username in the DB; a PAT pool (same
   round-robin pattern as the LLM keys) lifts the rate ceiling further.
 - **Database** — move off Neon's free tier to a pooled instance with read
   replicas for the read-heavy dashboard; add Redis for hot dashboard reads.
+- **More responsive frontend** — Streamlit re-runs the whole script on every
+  interaction and polls for run progress. For scale, swap it for a real SPA
+  (React) against the same FastAPI, with client-side caching, server-sent
+  events or websockets for live progress instead of polling, and paginated /
+  virtualised tables for large batches. The backend needs no change — the
+  frontend is already a pure API client.
 - **Provider swaps are config** — LLM, email, and the DB URL each change in
   one place, so moving to a bigger or faster provider is a settings change.
 - **Multi-tenant** — the current single shared DB has no per-user isolation;
