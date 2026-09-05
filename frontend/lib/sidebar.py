@@ -25,9 +25,6 @@ def render_session_indicator() -> None:
             f"Job **{st.session_state.get('job_id') or '—'}** · "
             f"Run **{st.session_state.get('run_id') or '—'}**"
         )
-        if st.session_state.get("_auto_discovered"):
-            st.caption("(auto-selected from the most recent data)")
-
         batch_id = st.session_state.get("batch_id")
         if batch_id:
             _render_progress(

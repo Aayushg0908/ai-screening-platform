@@ -67,8 +67,24 @@ if ranked:
         for r in ranked
     ]
     st.dataframe(table, width="stretch", hide_index=True)
+
     st.caption("Pre-test score by candidate")
     st.bar_chart({f"s_no {r['s_no']}": r["pre_test_score"] for r in ranked})
+
+    st.caption("Resume vs GitHub score — where each candidate's points come from")
+    st.bar_chart(
+        [
+            {
+                "candidate": f"s_no {r['s_no']}",
+                "resume": r.get("resume_score") or 0,
+                "github": r.get("github_score") or 0,
+            }
+            for r in ranked
+        ],
+        x="candidate",
+        y=["resume", "github"],
+        stack=False,
+    )
 else:
     st.caption("No ranked candidates yet.")
 

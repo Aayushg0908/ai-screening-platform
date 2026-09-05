@@ -194,6 +194,21 @@ if final and final.get("run_id") == run_id:
         st.caption("Final score by candidate")
         st.bar_chart({f"s_no {r['s_no']}": r["final_score"] for r in final_ranked})
 
+        st.caption("Pre-test vs final — how the test results moved each candidate")
+        st.bar_chart(
+            [
+                {
+                    "candidate": f"s_no {r['s_no']}",
+                    "pre_test": r["pre_test_score"] or 0,
+                    "final": r["final_score"] or 0,
+                }
+                for r in final_ranked
+            ],
+            x="candidate",
+            y=["pre_test", "final"],
+            stack=False,
+        )
+
     awaiting = final.get("awaiting_result") or []
     if awaiting:
         st.markdown("### Awaiting result")

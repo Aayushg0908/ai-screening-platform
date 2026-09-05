@@ -12,16 +12,12 @@ Run with::
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import streamlit as st
 
 # Streamlit puts this file's directory (frontend/) on sys.path, so ``lib`` is
 # importable directly. This package must never import from ``backend``.
 from lib.api_client import ApiError, get_client
 from lib.sidebar import render_session_indicator
-
-_WORKFLOW_DIAGRAM = Path(__file__).parent / "assets" / "workflow.png"
 
 st.set_page_config(page_title="AI Screening Platform", page_icon="🧑‍💻", layout="wide")
 
@@ -31,53 +27,55 @@ for _key in ("batch_id", "job_id", "run_id"):
     st.session_state.setdefault(_key, None)
 
 
-def _auto_discover_state(client) -> None:
-    """On a brand-new session (nothing selected yet), default each of
-    batch_id/job_id/run_id independently to the most recent value the
-    backend already has, so a reviewer's first visit shows results
-    immediately instead of "upload a file first" guidance.
+def _load_existing_data(client) -> None:
+    """Explicit, opt-in loader for a batch that already exists in the backend.
 
-    Runs at most once per session (subsequent reruns are a no-op) and never
-    overwrites a value already present - whether set by an earlier pass of
-    this same function or an explicit choice the user made on a page. Any
-    discovery call that fails or returns nothing is skipped silently: a
-    genuinely empty database still correctly falls through to each page's
-    normal empty-state message.
+    A fresh session starts completely empty - every page shows its normal
+    "upload a file first" guidance - so a brand-new visitor to the public
+    URL is never shown someone else's data. Picking a batch here sets
+    batch_id, then links its most recent completed run (and that run's
+    job_id) so the results pages have something to show without re-running
+    the pipeline.
     """
-    if st.session_state.get("_auto_discovery_done"):
-        return
-    st.session_state["_auto_discovery_done"] = True
-    discovered: dict[str, int] = {}
-
-    if st.session_state.get("batch_id") is None:
+    with st.expander("Load an existing batch (optional)", expanded=False):
         try:
             batches = client.list_batches()
-        except ApiError:
-            batches = []
-        if batches:
-            st.session_state["batch_id"] = batches[0]["batch_id"]
-            discovered["batch_id"] = batches[0]["batch_id"]
+        except ApiError as exc:
+            st.caption(f"Could not list batches: {exc}")
+            return
+        if not batches:
+            st.caption("No batches in the backend yet - upload one on page 1.")
+            return
 
-    if st.session_state.get("job_id") is None:
-        try:
-            jobs = client.list_jobs()
-        except ApiError:
-            jobs = []
-        if jobs:
-            st.session_state["job_id"] = jobs[0]["job_id"]
-            discovered["job_id"] = jobs[0]["job_id"]
-
-    if st.session_state.get("run_id") is None:
-        try:
-            runs = client.list_runs()
-        except ApiError:
-            runs = []
-        completed = next((r for r in runs if r.get("status") == "completed"), None)
-        if completed:
-            st.session_state["run_id"] = completed["run_id"]
-            discovered["run_id"] = completed["run_id"]
-
-    st.session_state["_auto_discovered"] = discovered
+        labels = {
+            f"Batch {b['batch_id']} — {b['filename']} ({b['row_count']} candidates)": b[
+                "batch_id"
+            ]
+            for b in batches
+        }
+        choice = st.selectbox(
+            "Existing batch", ["(none)"] + list(labels), key="_load_batch_choice"
+        )
+        if choice != "(none)" and st.button("Load this batch"):
+            picked = labels[choice]
+            st.session_state["batch_id"] = picked
+            try:
+                runs = client.list_runs()
+            except ApiError:
+                runs = []
+            run = next(
+                (
+                    r
+                    for r in runs
+                    if r["batch_id"] == picked and r.get("status") == "completed"
+                ),
+                None,
+            )
+            if run:
+                st.session_state["run_id"] = run["run_id"]
+                if run.get("job_id"):
+                    st.session_state["job_id"] = run["job_id"]
+            st.rerun()
 
 
 st.title("AI Screening Platform")
@@ -89,8 +87,8 @@ st.caption(
 )
 
 client = get_client()
-_auto_discover_state(client)
 render_session_indicator()
+_load_existing_data(client)
 
 try:
     health = client.health()
@@ -178,8 +176,26 @@ else:
 
 st.divider()
 st.markdown("### Workflow")
-if _WORKFLOW_DIAGRAM.exists():
-    st.image(str(_WORKFLOW_DIAGRAM), width="stretch")
+st.graphviz_chart(
+    """
+    digraph {
+        rankdir=LR;
+        bgcolor="transparent";
+        node [shape=box style="rounded,filled" fillcolor="#eef2ff"
+              color="#c7d2fe" fontname="Helvetica" fontsize=10 margin="0.15,0.1"];
+        edge [color="#94a3b8" arrowsize=0.7];
+        a [label="1. Upload\nCandidates"];
+        b [label="2. Job\nDescription"];
+        c [label="3. Evaluation"];
+        d [label="4. Rankings"];
+        e [label="5. Outreach"];
+        f [label="6. Test\nResults"];
+        g [label="7. Interviews"];
+        a -> b -> c -> d -> e -> f -> g;
+    }
+    """,
+    width="stretch",
+)
 st.markdown(
     """
     Use the sidebar to move through the pipeline in order - each page picks
