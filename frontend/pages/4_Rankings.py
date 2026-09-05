@@ -42,6 +42,14 @@ if not ranked and not unranked:
     st.info("No results yet — the evaluation may still be running (see page 3).")
     st.stop()
 
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Ranked", len(ranked))
+m2.metric("Unranked", len(unranked))
+top = ranked[0] if ranked else None
+m3.metric("Top score", top["pre_test_score"] if top else "—")
+avg = round(sum(r["pre_test_score"] for r in ranked) / len(ranked), 1) if ranked else None
+m4.metric("Average", avg if avg is not None else "—")
+
 st.markdown("### Ranked candidates")
 if ranked:
     table = [
@@ -59,6 +67,8 @@ if ranked:
         for r in ranked
     ]
     st.dataframe(table, width="stretch", hide_index=True)
+    st.caption("Pre-test score by candidate")
+    st.bar_chart({f"s_no {r['s_no']}": r["pre_test_score"] for r in ranked})
 else:
     st.caption("No ranked candidates yet.")
 
@@ -204,3 +214,4 @@ if rerank_clicked:
         st.markdown("### New order")
         st.caption("Compare this against the 'Ranked candidates' table above.")
         st.dataframe(table, width="stretch", hide_index=True)
+        st.bar_chart({f"s_no {r['s_no']}": r["pre_test_score"] for r in new_ranked})

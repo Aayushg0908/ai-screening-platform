@@ -114,6 +114,12 @@ else:
     except ApiError as exc:
         st.error(f"Could not load candidates: {exc}")
     else:
+        cm1, cm2, cm3 = st.columns(3)
+        cm1.metric("Total candidates", len(candidates))
+        with_github = sum(1 for c in candidates if c.get("github_source") not in (None, "none"))
+        cm2.metric("With GitHub", with_github)
+        recovered = sum(1 for c in candidates if c.get("github_source") == "text_fallback")
+        cm3.metric("Recovered from text", recovered)
         st.dataframe(candidates, width="stretch", hide_index=True)
 
     st.divider()

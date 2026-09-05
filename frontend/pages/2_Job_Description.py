@@ -32,6 +32,7 @@ except ApiError as exc:
     jobs = []
 
 if jobs:
+    st.metric("Total job descriptions", len(jobs))
     options = {f"#{j['job_id']} — {j['title']}": j["job_id"] for j in jobs}
     choice = st.selectbox("Use an existing job", ["(choose one)"] + list(options.keys()))
     if choice != "(choose one)" and st.button("Use this job"):

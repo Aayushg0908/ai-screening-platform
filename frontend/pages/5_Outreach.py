@@ -105,6 +105,10 @@ except ApiError as exc:
     st.error(f"Could not load email log: {exc}")
 else:
     if log:
+        lm1, lm2, lm3 = st.columns(3)
+        lm1.metric("Total logged", len(log))
+        lm2.metric("Sent", sum(1 for e in log if e.get("status") == "sent"))
+        lm3.metric("Failed", sum(1 for e in log if e.get("status") == "failed"))
         st.dataframe(log, width="stretch", hide_index=True)
     else:
         st.caption("No emails sent yet for this run.")

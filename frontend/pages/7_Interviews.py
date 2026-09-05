@@ -98,6 +98,14 @@ except ApiError as exc:
     st.error(f"Could not load interviews: {exc}")
     interviews = []
 
+if interviews:
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total", len(interviews))
+    m2.metric(
+        "Scheduled", sum(1 for i in interviews if i.get("status") == "scheduled")
+    )
+    m3.metric("With Meet link", sum(1 for i in interviews if i.get("meet_link")))
+
 if not interviews:
     st.caption("No interviews scheduled yet.")
 else:

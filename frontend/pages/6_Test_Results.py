@@ -148,6 +148,14 @@ if submitted:
 
 final = st.session_state.get("_final_results")
 if final and final.get("run_id") == run_id:
+    final_ranked = final.get("ranked") or []
+    awaiting_preview = final.get("awaiting_result") or []
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Scored", len(final_ranked))
+    m2.metric("Awaiting result", len(awaiting_preview))
+    top_final = final_ranked[0] if final_ranked else None
+    m3.metric("Top final score", top_final["final_score"] if top_final else "—")
+
     st.subheader(f"Final ranked table — {final['criterion']}")
     table = [
         {
@@ -160,9 +168,12 @@ if final and final.get("run_id") == run_id:
             "final_score": r["final_score"],
             "note": r.get("note"),
         }
-        for r in final.get("ranked") or []
+        for r in final_ranked
     ]
     st.dataframe(table, width="stretch", hide_index=True)
+    if final_ranked:
+        st.caption("Final score by candidate")
+        st.bar_chart({f"s_no {r['s_no']}": r["final_score"] for r in final_ranked})
 
     awaiting = final.get("awaiting_result") or []
     if awaiting:

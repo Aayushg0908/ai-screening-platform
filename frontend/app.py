@@ -103,18 +103,84 @@ else:
         st.error(f"Backend reported an unhealthy status: {health}")
 
 st.divider()
-st.subheader("Current session")
-c1, c2, c3 = st.columns(3)
-c1.metric("Candidate batch", st.session_state["batch_id"] or "—")
-c2.metric("Job description", st.session_state["job_id"] or "—")
-c3.metric("Evaluation run", st.session_state["run_id"] or "—")
+st.subheader("Pipeline overview")
 
+batch_id = st.session_state.get("batch_id")
+job_id = st.session_state.get("job_id")
+run_id = st.session_state.get("run_id")
+
+if not batch_id:
+    st.info(
+        "Nothing uploaded yet - head to **1. Upload Candidates** to get started."
+    )
+else:
+    candidates = None
+    try:
+        candidates = client.list_candidates(batch_id=batch_id)
+    except ApiError:
+        pass
+
+    run_status = results = None
+    if run_id:
+        try:
+            run_status = client.run_status(run_id)
+        except ApiError:
+            pass
+        try:
+            results = client.run_results(run_id)
+        except ApiError:
+            pass
+
+    email_log = interviews = []
+    if run_id:
+        try:
+            email_log = client.email_log(run_id)
+        except ApiError:
+            pass
+        try:
+            interviews = client.list_interviews(run_id)
+        except ApiError:
+            pass
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Candidates", len(candidates) if candidates is not None else "—")
+    with_github = (
+        sum(1 for c in candidates if c.get("github_source") != "none")
+        if candidates is not None
+        else None
+    )
+    m2.metric("With GitHub", with_github if with_github is not None else "—")
+    m3.metric(
+        "Evaluated",
+        f"{run_status['processed']}/{run_status['total']}" if run_status else "—",
+    )
+    scored = len(results.get("ranked", [])) if results else None
+    m4.metric("Scored", scored if scored is not None else "—")
+    sent = sum(1 for e in email_log if e.get("status") == "sent") if email_log else 0
+    m5.metric("Emails sent", sent)
+    scheduled = (
+        sum(1 for i in interviews if i.get("status") == "scheduled")
+        if interviews
+        else 0
+    )
+    m6.metric("Interviews", scheduled)
+
+    if results and results.get("ranked"):
+        st.caption("Pre-test score by candidate (current run)")
+        chart_data = {
+            f"s_no {r['s_no']}": r["pre_test_score"] for r in results["ranked"]
+        }
+        st.bar_chart(chart_data)
+
+st.divider()
 st.markdown(
     """
     ### Workflow
 
     Use the sidebar to move through the pipeline in order - each page picks
-    up `batch_id` / `job_id` / `run_id` from the step before it automatically.
+    up `batch_id` / `job_id` / `run_id` from the step before it automatically,
+    and every page shows what's already been done there so far, not just the
+    latest action.
 
     1. **Upload Candidates** — ingest the candidate dataset (CSV/XLSX).
     2. **Job Description** — define or pick the role to screen against.

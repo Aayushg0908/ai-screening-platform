@@ -153,3 +153,28 @@ if auto_track and status.get("status") not in ("completed", "failed"):
     else:
         st.success(f"Run finished with status: {status.get('status')}")
         st.balloons()
+
+st.divider()
+st.subheader("All evaluation runs")
+st.caption("Every batch evaluated so far, most recent first - not just the run above.")
+try:
+    all_runs = client.list_runs()
+except ApiError as exc:
+    st.error(f"Could not load run history: {exc}")
+else:
+    if all_runs:
+        table = [
+            {
+                "run_id": r["run_id"],
+                "batch_id": r["batch_id"],
+                "job_id": r.get("job_id"),
+                "status": r["status"],
+                "progress": f"{r['processed']}/{r['total']}",
+                "created_at": r["created_at"],
+                "current": "→" if r["run_id"] == run_id else "",
+            }
+            for r in all_runs
+        ]
+        st.dataframe(table, width="stretch", hide_index=True)
+    else:
+        st.caption("No runs yet.")
