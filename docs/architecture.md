@@ -117,7 +117,31 @@ dropping to Mistral immediately; `quality` mode waits for a Groq key so every
 candidate is scored by the same model. Every external call (DB, GitHub, LLM,
 email, Calendar) is wrapped in `tenacity` retry with exponential backoff.
 
-## 4. Constraints
+## 4. Scaling
+
+The design already carries the pieces that matter; scaling up is mostly
+config and infrastructure, not a rewrite.
+
+- **Backend** — stateless between requests, all state in Postgres, so it runs
+  behind a load balancer as N identical instances with no session affinity.
+- **Evaluation throughput** — each candidate's graph run is independent
+  (embarrassingly parallel). Today they run in-process a few at a time; the
+  next step is a job queue (Arq / Celery / RQ) with a worker pool that scales
+  on batch size.
+- **LLM capacity** — add keys to `GROQ_API_KEYS` (the pool picks them up with
+  no code change); on a paid tier set `BATCH_STAGGER_SECONDS=0` and raise
+  `BATCH_CONCURRENCY` and the pipeline runs fully parallel with no fallback.
+- **GitHub** — already cached per username in the DB; a PAT pool (same
+  round-robin pattern as the LLM keys) lifts the rate ceiling further.
+- **Database** — move off Neon's free tier to a pooled instance with read
+  replicas for the read-heavy dashboard; add Redis for hot dashboard reads.
+- **Provider swaps are config** — LLM, email, and the DB URL each change in
+  one place, so moving to a bigger or faster provider is a settings change.
+- **Multi-tenant** — the current single shared DB has no per-user isolation;
+  scoping batches/runs to an account id and adding auth is the main product
+  change needed for real multi-recruiter use.
+
+## 5. Constraints
 
 - **Free tier only, everywhere** — Groq (rate-limited), Neon Postgres (scales
   to zero when idle — connections use `pool_pre_ping` + recycle), Render
@@ -137,7 +161,7 @@ email, Calendar) is wrapped in `tenacity` retry with exponential backoff.
 - **Python 3.11**, both apps publicly hosted, deadline-bound scope — polish
   is cut before Calendar integration or hosting ever is.
 
-## 5. What a Recruiter Can Do
+## 6. What a Recruiter Can Do
 
 - Upload any similarly-shaped candidate CSV/XLSX — no fixed column order.
 - Trigger resume download + extraction and LLM evaluation with one click
@@ -157,7 +181,7 @@ email, Calendar) is wrapped in `tenacity` retry with exponential backoff.
   GitHub coverage, emails sent, interviews scheduled) on every page, not just
   the page just visited.
 
-## 6. What Sets This Platform Apart
+## 7. What Sets This Platform Apart
 
 - **Explainable by construction, not by add-on** — every dimension the LLM
   touches carries `score` + `reasoning` + `evidence`; the UI surfaces all of
