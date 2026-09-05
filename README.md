@@ -16,7 +16,7 @@ See [`CLAUDE.md`](CLAUDE.md) for the full design brief and
 | --- | --- |
 | Frontend (recruiter dashboard) | https://visl-screening-ui.onrender.com |
 | Backend API (docs at `/docs`) | https://ai-screening-platform.onrender.com |
-| Demo video | _to be added_ |
+| Demo video | https://drive.google.com/file/d/1HCti4Jf3FPaghqfdUFrp8PbBn-qz_Prq/view |
 
 Both services are on Render's free tier and spin down after ~15 minutes idle —
 the first request after a pause can take 30–60s to wake up.
