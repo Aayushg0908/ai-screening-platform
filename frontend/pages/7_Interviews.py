@@ -26,50 +26,135 @@ if not run_id:
     )
     st.stop()
 
-st.write(f"Scheduling interviews from run **#{run_id}**'s final scores.")
+st.write(f"Interviews are scheduled from run **#{run_id}**'s final scores.")
 
-with st.form("schedule_form"):
-    mode = st.radio("Qualify by", ["top_n", "threshold"], horizontal=True)
-    top_n, threshold = 3, 65.0
-    if mode == "top_n":
-        top_n = st.number_input("Top N", min_value=1, max_value=50, value=3)
-    else:
-        threshold = st.slider("Minimum final score", 0.0, 100.0, 65.0, 1.0)
+batch_id = st.session_state.get("batch_id")
 
-    start_date = st.date_input("Start date", value=dt.date.today() + dt.timedelta(days=1))
-    c1, c2 = st.columns(2)
-    day_start = c1.number_input("Working day starts (hour, 24h)", 0, 23, 10)
-    day_end = c2.number_input("Working day ends (hour, 24h)", 1, 24, 17)
-    c3, c4 = st.columns(2)
-    slot_minutes = c3.number_input("Slot length (minutes)", 15, 180, 45, step=15)
-    gap_minutes = c4.number_input("Gap between slots (minutes)", 0, 60, 15, step=5)
-    timezone = st.text_input("Timezone", value="Asia/Kolkata")
-    send_invites = st.checkbox("Send invitation emails", value=True)
-    force = st.checkbox("Force (cancel and re-book if already scheduled)")
+_SLOT_MINUTES = {"30 minutes": 30, "45 minutes": 45, "1 hour": 60, "1.5 hours": 90}
+_GAP_MINUTES = {"No break": 0, "10 minutes": 10, "15 minutes": 15, "30 minutes": 30}
+_TIMEZONES = [
+    "Asia/Kolkata",
+    "Asia/Dubai",
+    "Asia/Singapore",
+    "Europe/London",
+    "America/New_York",
+    "America/Los_Angeles",
+    "UTC",
+]
 
-    submitted = st.form_submit_button("Schedule interviews", type="primary")
+# ---- Step 1: choose who to interview -----------------------------------
+st.subheader("Step 1 — Choose who to interview")
+mode = st.radio(
+    "Qualify by",
+    ["top_n", "threshold"],
+    horizontal=True,
+    format_func=lambda m: "Top N candidates" if m == "top_n" else "Minimum score",
+)
+top_n, threshold = 3, 65.0
+if mode == "top_n":
+    top_n = st.number_input(
+        "How many of the top candidates?", min_value=1, max_value=50, value=3
+    )
+else:
+    threshold = st.slider("Minimum final score", 0.0, 100.0, 65.0, 1.0)
 
-if submitted:
+qualifying: list[dict] = []
+try:
+    _final = client.final_shortlist(
+        run_id, mode=mode, top_n=int(top_n), threshold=float(threshold)
+    )
+    qualifying = _final.get("shortlisted") or []
+except ApiError as exc:
+    st.error(f"Could not load qualifying candidates: {exc}")
+
+_emails: dict[int, str] = {}
+if batch_id:
     try:
-        with st.spinner("Booking Calendar events and sending invites..."):
-            report = client.schedule_interviews(
-                run_id,
-                mode=mode,
-                top_n=int(top_n),
-                threshold=float(threshold),
-                start_date=start_date.isoformat(),
-                day_start_hour=int(day_start),
-                day_end_hour=int(day_end),
-                slot_minutes=int(slot_minutes),
-                gap_minutes=int(gap_minutes),
-                timezone=timezone.strip() or "Asia/Kolkata",
-                send_invites=send_invites,
-                force=force,
-            )
-    except ApiError as exc:
-        st.error(f"Scheduling failed: {exc}")
-    else:
-        st.session_state["_schedule_report"] = report
+        _emails = {
+            c["candidate_id"]: c.get("email")
+            for c in client.list_candidates(batch_id=batch_id)
+        }
+    except ApiError:
+        pass
+
+if not qualifying:
+    st.info(
+        "No candidates qualify yet. Upload test results on page 6, or widen the "
+        "criteria above."
+    )
+else:
+    st.caption(f"These {len(qualifying)} candidate(s) will be invited:")
+    st.dataframe(
+        [
+            {
+                "rank": c.get("rank"),
+                "s_no": c["s_no"],
+                "name": c["name"],
+                "email": _emails.get(c["candidate_id"], "—"),
+                "final_score": c.get("final_score"),
+            }
+            for c in qualifying
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+
+    # ---- Step 2: set the schedule ------------------------------------
+    st.subheader("Step 2 — Set the interview times")
+    first_date = st.date_input(
+        "First interview date",
+        value=dt.date.today() + dt.timedelta(days=1),
+        min_value=dt.date.today(),
+    )
+    t1, t2 = st.columns(2)
+    earliest = t1.time_input(
+        "Earliest start time (each day)", value=dt.time(10, 0), step=3600
+    )
+    latest = t2.time_input(
+        "Latest start time (each day)", value=dt.time(17, 0), step=3600
+    )
+    o1, o2, o3 = st.columns(3)
+    length_label = o1.selectbox("Interview length", list(_SLOT_MINUTES), index=1)
+    gap_label = o2.selectbox("Break between interviews", list(_GAP_MINUTES), index=2)
+    timezone = o3.selectbox("Timezone", _TIMEZONES, index=0)
+    st.caption(
+        "Interviews are booked back-to-back from the first date, only between "
+        "the earliest and latest start times each day, rolling to the next day "
+        "once a day is full."
+    )
+
+    send_invites = st.checkbox(
+        "Email a calendar invite to each candidate", value=True
+    )
+    force = st.checkbox("Reschedule anyone who is already booked", value=False)
+
+    if st.button(
+        f"Schedule {len(qualifying)} interview(s)", type="primary"
+    ):
+        if earliest.hour >= latest.hour:
+            st.error("The latest start time must be after the earliest start time.")
+        else:
+            try:
+                with st.spinner("Booking Calendar events and sending invites..."):
+                    report = client.schedule_interviews(
+                        run_id,
+                        mode=mode,
+                        top_n=int(top_n),
+                        threshold=float(threshold),
+                        start_date=first_date.isoformat(),
+                        day_start_hour=earliest.hour,
+                        day_end_hour=latest.hour,
+                        slot_minutes=_SLOT_MINUTES[length_label],
+                        gap_minutes=_GAP_MINUTES[gap_label],
+                        timezone=timezone,
+                        send_invites=send_invites,
+                        force=force,
+                    )
+            except ApiError as exc:
+                st.error(f"Scheduling failed: {exc}")
+            else:
+                st.session_state["_schedule_report"] = report
+                st.rerun()
 
 report = st.session_state.get("_schedule_report")
 if report and report.get("run_id") == run_id:
