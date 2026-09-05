@@ -114,6 +114,13 @@ Every page shows a "what's already happened here" summary (metrics, tables,
 a pipeline-progress bar in the sidebar) — not just the result of the last
 click.
 
+> **Note on the test link.** The link emailed to shortlisted candidates
+> (`TEST_LINK_URL`) currently points to a **sample Google Form** — a stand-in
+> for a real coding/aptitude assessment. In production a recruiter would set
+> this to their actual test platform (HackerRank, Codility, an internal form,
+> etc.); it is a single config value and nothing else in the pipeline changes.
+> The scored results are then uploaded back on the **Test Results** page.
+
 ## Deployment (Render)
 
 Two separate services, backend and frontend, each reading `$PORT` from the
