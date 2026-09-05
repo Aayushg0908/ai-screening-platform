@@ -35,3 +35,9 @@ tmp/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Demo video — hosted on Drive/YouTube, never committed (large binary)
+*.mp4
+*.mov
+*.mkv
+*.webm
