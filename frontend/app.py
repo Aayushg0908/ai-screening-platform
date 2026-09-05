@@ -26,9 +26,17 @@ st.set_page_config(page_title="AI Screening Platform", page_icon="🧑‍💻", 
 for _key in ("batch_id", "job_id", "run_id"):
     st.session_state.setdefault(_key, None)
 
+# The deployment has one shared database and no accounts, so every visitor
+# upload is a permanent batch row. Rather than list all of them (and show
+# strangers' test uploads to everyone), the "Load an existing batch" picker
+# only offers this curated allowlist of demo batches. A visitor who uploads
+# their own file still gets its batch_id set on their session automatically
+# by page 1 - they don't need this picker at all.
+_PREVIEW_BATCH_IDS = (1, 12)
+
 
 def _load_existing_data(client) -> None:
-    """Explicit, opt-in loader for a batch that already exists in the backend.
+    """Explicit, opt-in loader for one of the curated demo batches.
 
     A fresh session starts completely empty - every page shows its normal
     "upload a file first" guidance - so a brand-new visitor to the public
@@ -37,14 +45,15 @@ def _load_existing_data(client) -> None:
     job_id) so the results pages have something to show without re-running
     the pipeline.
     """
-    with st.expander("Load an existing batch (optional)", expanded=False):
+    with st.expander("Load a demo batch (optional)", expanded=False):
         try:
             batches = client.list_batches()
         except ApiError as exc:
             st.caption(f"Could not list batches: {exc}")
             return
+        batches = [b for b in batches if b["batch_id"] in _PREVIEW_BATCH_IDS]
         if not batches:
-            st.caption("No batches in the backend yet - upload one on page 1.")
+            st.caption("No demo batch available right now.")
             return
 
         labels = {
