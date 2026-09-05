@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from lib.api_client import ApiError, get_client
+from lib.sidebar import render_session_indicator
 
 st.set_page_config(page_title="Upload Candidates", page_icon="📤", layout="wide")
 st.title("1. Upload Candidates")
@@ -13,6 +14,7 @@ for _key in ("batch_id", "job_id", "run_id"):
     st.session_state.setdefault(_key, None)
 
 client = get_client()
+render_session_indicator()
 
 
 @st.cache_data(ttl=15)

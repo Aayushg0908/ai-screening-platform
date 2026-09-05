@@ -159,6 +159,11 @@ class ApiClient:
             },
         )
 
+    def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Every evaluation run, most recent first - used to auto-discover
+        the latest run on first load, before any explicit selection."""
+        return self._request("GET", "/evaluate/runs", params={"limit": limit})
+
     def run_status(self, run_id: int) -> dict[str, Any]:
         """Poll this - never cache it."""
         return self._request("GET", f"/evaluate/runs/{run_id}")

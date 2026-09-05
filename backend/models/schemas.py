@@ -313,6 +313,22 @@ class RunStatusOut(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class RunSummaryOut(BaseModel):
+    """One row for ``GET /evaluate/runs`` - a list view, not the
+    ``GET /evaluate/runs/{run_id}`` single-run detail. Lets a client (the
+    frontend on first load, with no prior selection) discover which runs
+    exist without knowing a run_id in advance.
+    """
+
+    run_id: int
+    batch_id: int
+    job_id: int | None = None
+    status: str
+    processed: int
+    total: int
+    created_at: datetime
+
+
 class RunResultItem(BaseModel):
     """One candidate in a run's results.
 

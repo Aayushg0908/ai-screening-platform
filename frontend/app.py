@@ -17,6 +17,7 @@ import streamlit as st
 # Streamlit puts this file's directory (frontend/) on sys.path, so ``lib`` is
 # importable directly. This package must never import from ``backend``.
 from lib.api_client import ApiError, get_client
+from lib.sidebar import render_session_indicator
 
 st.set_page_config(page_title="AI Screening Platform", page_icon="🧑‍💻", layout="wide")
 
@@ -24,6 +25,56 @@ st.set_page_config(page_title="AI Screening Platform", page_icon="🧑‍💻", 
 # (show guidance, not a KeyError) when a prior step hasn't run yet.
 for _key in ("batch_id", "job_id", "run_id"):
     st.session_state.setdefault(_key, None)
+
+
+def _auto_discover_state(client) -> None:
+    """On a brand-new session (nothing selected yet), default each of
+    batch_id/job_id/run_id independently to the most recent value the
+    backend already has, so a reviewer's first visit shows results
+    immediately instead of "upload a file first" guidance.
+
+    Runs at most once per session (subsequent reruns are a no-op) and never
+    overwrites a value already present - whether set by an earlier pass of
+    this same function or an explicit choice the user made on a page. Any
+    discovery call that fails or returns nothing is skipped silently: a
+    genuinely empty database still correctly falls through to each page's
+    normal empty-state message.
+    """
+    if st.session_state.get("_auto_discovery_done"):
+        return
+    st.session_state["_auto_discovery_done"] = True
+    discovered: dict[str, int] = {}
+
+    if st.session_state.get("batch_id") is None:
+        try:
+            batches = client.list_batches()
+        except ApiError:
+            batches = []
+        if batches:
+            st.session_state["batch_id"] = batches[0]["batch_id"]
+            discovered["batch_id"] = batches[0]["batch_id"]
+
+    if st.session_state.get("job_id") is None:
+        try:
+            jobs = client.list_jobs()
+        except ApiError:
+            jobs = []
+        if jobs:
+            st.session_state["job_id"] = jobs[0]["job_id"]
+            discovered["job_id"] = jobs[0]["job_id"]
+
+    if st.session_state.get("run_id") is None:
+        try:
+            runs = client.list_runs()
+        except ApiError:
+            runs = []
+        completed = next((r for r in runs if r.get("status") == "completed"), None)
+        if completed:
+            st.session_state["run_id"] = completed["run_id"]
+            discovered["run_id"] = completed["run_id"]
+
+    st.session_state["_auto_discovered"] = discovered
+
 
 st.title("AI Screening Platform")
 st.caption(
@@ -34,6 +85,9 @@ st.caption(
 )
 
 client = get_client()
+_auto_discover_state(client)
+render_session_indicator()
+
 try:
     health = client.health()
 except ApiError as exc:

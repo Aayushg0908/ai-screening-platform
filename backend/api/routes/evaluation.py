@@ -16,6 +16,7 @@ from backend.models.schemas import (
     RunResultItem,
     RunResultsOut,
     RunStatusOut,
+    RunSummaryOut,
     ScoreWeights,
 )
 from backend.models.schemas import GitHubEvaluation, ResumeEvaluation
@@ -122,6 +123,21 @@ def _get_run(session: Session, run_id: int) -> PipelineRun:
     if run is None:
         raise HTTPException(404, f"run {run_id} not found")
     return run
+
+
+@router.get("/runs", response_model=list[RunSummaryOut])
+def list_runs(
+    limit: int = Query(50, ge=1, le=200, description="Max rows to return"),
+    session: Session = Depends(get_session),
+) -> list[PipelineRun]:
+    """Every evaluation run, most recent first - lets a client discover which
+    runs exist without already knowing a run_id (e.g. the frontend on first
+    load, before any selection has been made)."""
+    return list(
+        session.exec(
+            select(PipelineRun).order_by(PipelineRun.run_id.desc()).limit(limit)
+        ).all()
+    )
 
 
 @router.get("/runs/{run_id}", response_model=RunStatusOut)
