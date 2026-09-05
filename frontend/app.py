@@ -12,12 +12,16 @@ Run with::
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
 
 # Streamlit puts this file's directory (frontend/) on sys.path, so ``lib`` is
 # importable directly. This package must never import from ``backend``.
 from lib.api_client import ApiError, get_client
 from lib.sidebar import render_session_indicator
+
+_WORKFLOW_DIAGRAM = Path(__file__).parent / "assets" / "workflow.png"
 
 st.set_page_config(page_title="AI Screening Platform", page_icon="🧑‍💻", layout="wide")
 
@@ -173,10 +177,11 @@ else:
         st.bar_chart(chart_data)
 
 st.divider()
+st.markdown("### Workflow")
+if _WORKFLOW_DIAGRAM.exists():
+    st.image(str(_WORKFLOW_DIAGRAM), width="stretch")
 st.markdown(
     """
-    ### Workflow
-
     Use the sidebar to move through the pipeline in order - each page picks
     up `batch_id` / `job_id` / `run_id` from the step before it automatically,
     and every page shows what's already been done there so far, not just the
