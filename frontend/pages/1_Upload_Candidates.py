@@ -109,6 +109,7 @@ if not batch_id:
     st.info("Upload a candidate file first.")
 else:
     st.subheader(f"Candidates in batch {batch_id}")
+    candidates = []
     try:
         candidates = _cached_candidates(batch_id)
     except ApiError as exc:
@@ -125,6 +126,16 @@ else:
     st.divider()
     st.subheader("Process resumes")
     resumes_processed = st.session_state.get("resumes_processed_batch_id") == batch_id
+    if not resumes_processed and candidates:
+        # session_state alone can't tell a fresh visitor that resumes were
+        # already processed server-side (e.g. a seeded demo batch) - fall
+        # back to a live check, same probe page 3 uses.
+        try:
+            if client.get_candidate_resume(candidates[0]["candidate_id"]) is not None:
+                resumes_processed = True
+                st.session_state["resumes_processed_batch_id"] = batch_id
+        except ApiError:
+            pass
     if resumes_processed:
         st.success(
             "Resumes processed for this batch - evaluation will read real "
