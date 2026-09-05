@@ -1,155 +1,182 @@
-# Architecture
+# Architecture — AI Screening Platform
 
-## Overview
+Visl AI Labs' candidate screening platform: ingest a candidate dataset,
+evaluate each candidate against a job description with an LLM, analyze their
+GitHub at repository level, score and rank deterministically, email a test
+link to the shortlist, ingest test results, and schedule interviews on Google
+Calendar with a real Meet link — end to end, with no manual step in between.
 
-## System Context
+## 1. High-Level Design
 
-## Component Diagram
+```mermaid
+flowchart TB
+    R["Recruiter (browser)"]
 
-## Backend
+    subgraph Client["Hosted on Render"]
+        FE["Streamlit Frontend\n(thin UI, no business logic)"]
+        BE["FastAPI Backend\nroutes -> services -> graph"]
+    end
 
-### FastAPI Application
+    subgraph Data["Data Layer"]
+        DB[("Postgres — Neon\nSQLModel, 11 tables")]
+    end
 
-### Configuration
+    subgraph External["External Services"]
+        LLM["Groq gpt-oss-120b pool\n+ Mistral fallback"]
+        GH["GitHub REST API"]
+        DRIVE["Google Drive\n(resume PDFs)"]
+        MAIL["Brevo Email API\n(SMTP fallback)"]
+        CAL["Google Calendar API\n+ Meet"]
+    end
 
-### Database Layer
+    R -->|HTTPS| FE
+    FE -->|REST/JSON, the ONLY channel| BE
+    BE <--> DB
+    BE --> LLM
+    BE --> GH
+    BE --> DRIVE
+    BE --> MAIL
+    BE --> CAL
+    CAL -->|calendar invite + Meet link| R2["Candidate's inbox"]
+    MAIL -->|test link / interview invite| R2
+```
 
-### API Routes
+**Why this shape.** The frontend is a pure HTTP client (`frontend/lib/api_client.py`
+is the *only* module that talks to the backend) — it never imports backend code
+and holds no business logic, so the backend can be re-skinned or driven by any
+other client without change. The backend is stateless between requests; all
+state lives in Postgres, so it can be redeployed or scaled to N instances with
+no session affinity. Every external dependency (LLM, GitHub, email, Calendar)
+sits behind its own `services/` module, so a provider swap (already exercised
+twice — Gmail → Resend → Brevo, and Groq → Mistral on rate-limit) is a config
+change, not a rewrite.
 
-### Services
+## 2. End-to-End Workflow
 
-## Evaluation Pipeline (LangGraph)
+```mermaid
+flowchart LR
+    A["1. Upload CSV/XLSX\nsynonym-mapped columns"] --> B["2. Process resumes\nDrive -> PDF -> text"]
+    B --> C["3. Create/select\njob description"]
+    C --> D["4. Evaluate batch\nLangGraph, per candidate"]
+    D --> E["5. Rank + explain\nweighted, zero re-inference to retune"]
+    E --> F["6. Outreach\ntest-link email to shortlist"]
+    F --> G["7. Upload test results\nLEFT JOIN on s_no"]
+    G --> H["8. Schedule interviews\nreal Calendar + Meet"]
+```
 
-### State
+Every arrow is a recruiter action through the Streamlit UI, backed by one
+FastAPI endpoint. Each stage persists incrementally (one candidate/row at a
+time, not at batch end) and degrades a single failure to a logged error
+rather than aborting the batch — a dead resume link or a candidate with no
+GitHub profile never blocks the other nine.
 
-### Nodes
+## 3. Agentic Evaluation Pipeline (LangGraph)
 
-### Graph Topology
+One compiled graph, invoked once per candidate (`backend/graph/pipeline.py`):
 
-### Parallelism and Error Handling
+```mermaid
+flowchart LR
+    START((START)) --> LR["load_resume\nfetch latest extracted text"]
+    LR --> EJ["evaluate_vs_jd\nLLM: resume vs JD, per-dimension"]
+    LR --> AG["analyze_github\nrepo-level: top-3 repos + README + langs"]
+    EJ --> AGG["aggregate\ndeterministic weighted blend"]
+    AG --> AGG
+    AGG --> END((END))
+```
 
-## LLM Integration
-
-### Provider Factory
-
-`services/llm.py` exposes a single `get_llm()` factory returning an `LLMClient`
-that fronts a **round-robin pool of Groq API keys**, all serving the same
-`gpt-oss-120b` model. Groq's 8000 TPM rate limit is org-level, so each key from a
-separate account is an independent token bucket on an identical model — scoring
-quality is unaffected. Per call, the client rotates its starting key; on a 429 it
-moves straight to the next key (no sleep) and puts the throttled key on a ~60s
-process-wide cooldown. Mistral (`ministral-8b-latest`) is the last resort,
-reached only when every Groq key is cooling down.
-
-**Horizontal scaling:** inference capacity is a config change with no pipeline
-modification — add another key to `GROQ_API_KEYS` (comma-separated) and the pool
-picks it up on the next `get_llm()`.
-
-### Evaluation modes (`EVALUATION_MODE`)
-
-A batch runs under one of two profiles, surfaced in the API response
-(`RunResultsOut.mode`, `RunResultItem.model_used`) so the trade-off is visible:
-
-| | `fast` (deployment default) | `quality` (stored demo run) |
+| Node | Does | On failure |
 |---|---|---|
-| inter-candidate stagger | 5s | 20s |
-| per-key 429 cooldown | 60s | 120s |
-| pre-emptive wait for a free Groq key | no — drop to Mistral immediately | yes, capped at 90s |
-| ~duration, 10 candidates | ~3 min | ~8–10 min |
+| `load_resume` | Reads the candidate's extracted resume text | Missing text is not fatal — evaluation proceeds on dataset fields alone |
+| `evaluate_vs_jd` | LLM scores skills match, project depth, experience relevance, research — each with `score` + `reasoning` + `evidence` | `resume_score` stays `None` (never 0) so weight redistributes |
+| `analyze_github` | Fetches repos, drops forks, ranks by recency/stars/substance, sends top 3 (README + language breakdown) to the LLM alongside deterministic signals | `NO_PROFILE`/`NOT_FOUND` are normal states, not errors; only a real API failure is logged |
+| `aggregate` | Pure Python: blends `resume_score` + `github_score` into `pre_test_score` | Never raises — computes from whatever is available |
 
-`fast` keeps a reviewer who uploads their own CSV from watching a progress bar
-for ten minutes; it accepts that some candidates are scored by the smaller
-`ministral-8b` fallback. `quality` spaces work out and waits for a Groq key so
-every candidate is scored by `gpt-oss-120b`.
+`evaluate_vs_jd` and `analyze_github` fan out in parallel and converge on
+`aggregate`; every node try/excepts internally and writes to a shared
+`errors` list (merged via an `operator.add` reducer) instead of raising, so
+one candidate's exception can never take down the batch. The graph is
+compiled once at import and reused for all candidates.
 
-**This is a deliberate free-tier trade-off.** On a paid Groq tier the per-minute
-token ceiling disappears and both modes collapse into one — set
-`BATCH_STAGGER_SECONDS` low, raise `BATCH_CONCURRENCY`, and the pipeline runs
-fully parallel with no fallback.
+**Scoring is never LLM-computed.** The LLM only emits structured
+per-dimension scores with reasoning; `services/scoring.py` does the
+arithmetic:
 
-The stagger does **not** scale with pool size: each candidate's resume + GitHub
-calls fan out in parallel and the pool round-robins them onto *different* keys,
-so every candidate loads every key at once. The stagger governs per-key recovery
-and must stay fixed regardless of how many keys are configured.
+```
+pre_test = 0.40·resume_jd + 0.25·github + 0.20·projects + 0.15·academics
+final    = 0.60·pre_test  + 0.20·test_la + 0.20·test_code
+```
 
-### Known limitation: pre-emptive wait is per-candidate
+Weights are config, not code — recruiters retune the resume/GitHub blend and
+re-rank instantly from stored scores, with **zero new LLM or GitHub calls**.
 
-In `quality` mode, `run_batch` checks the Groq pool before dispatching each
-candidate and, if every key is cooling down, sleeps (capped at 90s) for a key to
-free rather than dropping to Mistral. But a candidate fires **two** LLM calls in
-parallel (resume + GitHub). When exactly one key is hot at dispatch time, the
-first call takes it — and usually 429s it — so the second call, a few seconds
-later, finds the pool exhausted and falls to Mistral. The batch-level guard
-cannot hold a call it has already dispatched.
+**Resilience:** Groq calls run through a round-robin pool of API keys (each
+an independent free-tier token bucket on the same model); a 429 rotates to
+the next key with a cooldown, and the pool falls back to Mistral only when
+every key is cooling down. `fast` mode (deployment default) favors speed by
+dropping to Mistral immediately; `quality` mode waits for a Groq key so every
+candidate is scored by the same model. Every external call (DB, GitHub, LLM,
+email, Calendar) is wrapped in `tenacity` retry with exponential backoff.
 
-Measured effect on the stored demo run (`quality`, 10 candidates): 13 of 16 LLM
-calls on `gpt-oss-120b`, 3 on the `ministral-8b` fallback (two GitHub calls, one
-resume call for the lowest-scoring candidate), 10/10 candidates scored, zero
-errors.
+## 4. Constraints
 
-**Fix identified, deprioritised for the deadline:** move the wait into
-`LLMClient.invoke()` so it applies per call, not per candidate — then a
-candidate's second call also waits for a free key. Optionally raise the 429
-cooldown 120s → ~150s, since a freshly-freed key is sometimes re-throttled
-within a second.
+- **Free tier only, everywhere** — Groq (rate-limited), Neon Postgres (scales
+  to zero when idle — connections use `pool_pre_ping` + recycle), Render
+  (cold starts, and outbound SMTP ports are blocked at the platform level,
+  which is why email goes over Brevo's HTTPS API, not SMTP, in production).
+- **Open-source LLM preferred** — `openai/gpt-oss-120b` on Groq is primary;
+  Mistral is the fallback only.
+- **Real Google Calendar integration, no mocks** — events must actually
+  appear on a calendar with a working Meet link (`conferenceDataVersion=1` is
+  mandatory; without it Google silently drops the Meet link).
+- **GitHub analysis must be repository-level** — profile stats alone
+  (followers, total stars) do not satisfy this; individual repos are fetched
+  and their contents evaluated.
+- **Dynamic schema, not a fixed CSV shape** — columns are matched
+  case-insensitively via a synonym map; an unmappable required column fails
+  with a named error, never a `KeyError`.
+- **Python 3.11**, both apps publicly hosted, deadline-bound scope — polish
+  is cut before Calendar integration or hosting ever is.
 
-### Cost of the throttling
+## 5. What a Recruiter Can Do
 
-Actual inference time for 10 candidates is **~90 seconds**. The rest of a
-`quality`-mode batch's ~8-minute duration is deliberate throttling to stay under
-the free-tier 8000 TPM per key. On a paid tier, `BATCH_STAGGER_SECONDS=0` and
-`BATCH_CONCURRENCY=5` bring the batch under two minutes with no code changes.
+- Upload any similarly-shaped candidate CSV/XLSX — no fixed column order.
+- Trigger resume download + extraction and LLM evaluation with one click
+  each; watch live progress and partial results as a batch runs.
+- Choose `fast` vs `quality` evaluation mode as a speed/consistency trade-off.
+- See **every** score's reasoning and quoted evidence, not just a number —
+  per resume dimension and per GitHub dimension.
+- Re-weight the resume/GitHub blend and re-rank instantly, with **zero**
+  inference cost, to explore "what if projects mattered more."
+- Preview a shortlist by top-N or score threshold before anything is sent;
+  send test-invite emails, with a force-resend option.
+- Upload test results at any time — missing rows are never scored zero, and
+  the final blend weights are separately tunable.
+- Schedule interviews by top-N or final-score threshold, with custom working
+  hours, slot length, gap, and timezone; cancel and re-book.
+- See a per-batch pipeline-progress bar and a live dashboard (candidates,
+  GitHub coverage, emails sent, interviews scheduled) on every page, not just
+  the page just visited.
 
-### Structured Output
+## 6. What Sets This Platform Apart
 
-### Fallback Strategy
-
-## Scoring Model
-
-### Dimensions and Weights
-
-### Deterministic Aggregation
-
-### Test Result Blending
-
-## GitHub Analysis
-
-### Repository Selection
-
-### Caching
-
-## Data Ingestion
-
-### Candidate Dataset
-
-### Dataset Traps and Mitigations
-
-### Test Results Merge
-
-## Outreach
-
-### Email Delivery
-
-## Interview Scheduling
-
-### Google Calendar and Meet
-
-## Frontend (Streamlit)
-
-### Pages
-
-### API Client
-
-### Polling Model
-
-## Deployment
-
-### Environment Variables
-
-### Free-Tier Constraints
-
-## Sequence: End-to-End Run
-
-## Future Work
-Actual inference time for 10 candidates is ~90 seconds. The remaining batch duration is deliberate throttling to stay within free-tier token limits. On a paid tier, BATCH_STAGGER_SECONDS=0 and BATCH_CONCURRENCY=5 reduce the batch to under two minutes with no code changes.
-The batch-level pre-emptive guard checks key availability once per candidate, but each candidate dispatches two parallel LLM calls. When exactly one key is hot at dispatch, the first call consumes it and the second finds the pool exhausted, falling back. A per-call guard inside the LLM client would close this — a known limitation documented rather than hidden.
+- **Explainable by construction, not by add-on** — every dimension the LLM
+  touches carries `score` + `reasoning` + `evidence`; the UI surfaces all of
+  it, because it was never thrown away in the first place.
+- **Scoring is deterministic and auditable** — the LLM never outputs a final
+  number. A recruiter can see exactly why two candidates are 2 points apart,
+  and change the formula's weights without re-running inference.
+- **GitHub analysis reads code, not vanity metrics** — top repos are
+  selected by recency/stars/substance, forks dropped, README + languages
+  sent to the LLM; a candidate with 10,000 followers and no original repos
+  scores on substance, not reputation.
+- **Provider-agnostic and already proven so** — the LLM, email, and (in
+  design) the DB session boundary are all swappable via one config value;
+  this was exercised for real mid-project (Gmail → Brevo, Groq → Mistral),
+  not just designed for hypothetically.
+- **Real infrastructure, not a demo stub** — Calendar events carry working
+  Meet links today, on the free tier, with no mocked response anywhere in
+  the path.
+- **Failure is a data point, not a crash** — a dead resume link, a missing
+  GitHub profile, a missing test score, or a throttled LLM key each degrade
+  to an explicit state (`NO_RESULT`, `NO_PROFILE`, a logged error) that the
+  UI shows plainly, while the rest of the batch keeps moving.
