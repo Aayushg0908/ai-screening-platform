@@ -94,28 +94,34 @@ class Settings(BaseSettings):
         description="Fine-grained PAT; unauthenticated GitHub is 60 req/hr.",
     )
 
-    # ---- Email: Resend HTTP API (§4.6) --------------------------------------
-    # Switched from Gmail SMTP: Render's egress cannot reliably reach Gmail's
-    # SMTP frontends on any port (confirmed - 0-8% send success rate even
-    # after retrying every resolved address on both 587 and 465). Resend is a
-    # plain HTTPS POST on port 443, immune to that class of problem.
-    resend_api_key: str = Field("", validation_alias="RESEND_API_KEY")
-    resend_from: str = Field(
-        "AI Screening Platform <onboarding@resend.dev>",
-        validation_alias="RESEND_FROM",
-        description="Resend's sandbox sender (onboarding@resend.dev) can only "
-        "send to the account's own verified address until a domain is "
-        "verified at resend.com/domains.",
-    )
+    # ---- Email: SMTP relay (§4.6) - Brevo -----------------------------------
+    # Gmail SMTP failed almost entirely from Render's egress (0/9 in a clean
+    # test, "Network is unreachable" on every resolved address, both 587 and
+    # 465 - a network-layer block, not a bad IP). Resend's HTTP API avoided
+    # that but its no-domain sandbox only delivers to the account's own
+    # address. Brevo's relay is a single stable host and needs only
+    # single-sender verification (one address) to send to any recipient.
+    smtp_host: str = Field("smtp-relay.brevo.com", validation_alias="SMTP_HOST")
+    smtp_port: int = Field(587, validation_alias="SMTP_PORT")
+    #: Tried second, via implicit SSL, if the configured port is blocked.
+    #: Costs nothing to keep even though it made no difference against
+    #: Gmail's block - if 587 is ever the one restricted, this still helps.
+    smtp_port_fallback: int = Field(465, validation_alias="SMTP_PORT_FALLBACK")
+    smtp_user: str = Field("", validation_alias="SMTP_USER")
+    smtp_password: str = Field("", validation_alias="SMTP_PASSWORD")
+    #: The verified sender address - NOT the same as smtp_user with a relay
+    #: like Brevo, where the SMTP login is an account identifier rather than
+    #: a deliverable mailbox. This is what actually appears in the From
+    #: header and the SMTP envelope, and must be a single-sender-verified
+    #: (or domain-verified) address with the provider.
+    smtp_from: str = Field("", validation_alias="SMTP_FROM")
     #: Signature name in the email body - kept independent of the transport.
     smtp_from_name: str = Field(
         "Visl AI Labs Recruitment", validation_alias="SMTP_FROM_NAME"
     )
     #: Dev/testing only. When set, every outgoing email also goes to this
-    #: address as a Bcc so real outgoing mail can be inspected. Empty by
-    #: default. (SMTP_HOST/PORT/USER/PASSWORD still exist in .env for
-    #: scripts/preflight.py's independent Gmail check - backend/ itself no
-    #: longer reads them.)
+    #: address as a Bcc (in the SMTP envelope, never a visible header) so
+    #: real outgoing mail can be inspected. Empty by default.
     email_bcc: str = Field("", validation_alias="EMAIL_BCC")
 
     # ---- Assessment link mailed to the shortlist -------------------------------
