@@ -50,6 +50,41 @@ m3.metric("Top score", top["pre_test_score"] if top else "—")
 avg = round(sum(r["pre_test_score"] for r in ranked) / len(ranked), 1) if ranked else None
 m4.metric("Average", avg if avg is not None else "—")
 
+with st.expander("What is the pre-test score, and how is it calculated?"):
+    st.markdown(
+        """
+        The **pre-test score** (0–100) is the candidate's standing *before*
+        any coding/aptitude test — it blends the resume-vs-JD assessment with
+        the repository-level GitHub analysis. It is **deterministic Python
+        arithmetic**, never a number the LLM invents: the LLM only emits
+        per-dimension scores (0–10) with reasoning and evidence; the weighted
+        sums below are computed in `services/scoring.py`.
+
+        **1. Resume score** (0–100) — LLM scores four dimensions 0–10, then:
+
+        `10 × (0.30·skills_match + 0.30·project_depth + 0.25·experience_relevance + 0.15·research)`
+
+        **2. GitHub score** (0–100) — LLM scores four dimensions 0–10 on the
+        top repositories, then:
+
+        `10 × (0.35·repository_quality + 0.30·technical_relevance + 0.20·activity_consistency + 0.15·engineering_practice)`
+
+        **3. Pre-test score** — blend of the two:
+
+        `0.60 × resume_score + 0.40 × github_score`
+
+        If a candidate has **no GitHub profile** (or the analysis failed), the
+        GitHub weight is redistributed onto the resume — they're judged on the
+        resume alone, never scored zero for the missing part. If *both* fail
+        the candidate is *unscorable* and kept out of the ranking entirely,
+        not buried at the bottom.
+
+        Every weight is configurable, and the sliders in **Weight tuning**
+        below re-rank from the same stored dimension scores instantly — no new
+        LLM or GitHub calls.
+        """
+    )
+
 st.markdown("### Ranked candidates")
 if ranked:
     table = [
