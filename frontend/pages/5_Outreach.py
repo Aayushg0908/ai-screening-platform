@@ -31,14 +31,18 @@ else:
     threshold = st.slider("Minimum pre-test score", 0.0, 100.0, 60.0, 1.0)
 
 if st.button("Preview shortlist", type="primary"):
+    # Capture the criteria used for THIS preview. Send reuses these exact
+    # values rather than re-reading the widgets - st.number_input doesn't
+    # commit a typed value until it loses focus, so clicking Send straight
+    # after typing would otherwise send with the stale (default) number.
+    params = {"mode": mode, "top_n": int(top_n), "threshold": float(threshold)}
     try:
-        preview = client.preview_shortlist(
-            run_id, mode=mode, top_n=int(top_n), threshold=float(threshold)
-        )
+        preview = client.preview_shortlist(run_id, **params)
     except ApiError as exc:
         st.error(f"Could not preview shortlist: {exc}")
     else:
         st.session_state["_shortlist_preview"] = preview
+        st.session_state["_shortlist_params"] = params
 
 preview = st.session_state.get("_shortlist_preview")
 if preview and preview.get("run_id") == run_id:
@@ -68,16 +72,20 @@ if preview and preview.get("run_id") == run_id:
 
     st.divider()
     st.markdown("### Send invitations")
-    st.caption("Preview and send are separate actions — previewing never sends anything.")
+    _params = st.session_state.get("_shortlist_params") or {}
+    st.caption(
+        f"Sends exactly the shortlist previewed above ({preview['criterion']}) — "
+        f"{len(rows)} candidate(s). Previewing never sends anything."
+    )
     force = st.checkbox("Force resend (even if already emailed)")
     if st.button("Send invitations", type="primary"):
         try:
             with st.spinner("Sending..."):
                 report = client.send_invitations(
                     run_id,
-                    mode=mode,
-                    top_n=int(top_n),
-                    threshold=float(threshold),
+                    mode=_params.get("mode", "top_n"),
+                    top_n=_params.get("top_n", 5),
+                    threshold=_params.get("threshold", 60.0),
                     force=force,
                 )
         except ApiError as exc:
