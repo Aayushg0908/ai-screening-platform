@@ -94,13 +94,24 @@ class Settings(BaseSettings):
         description="Fine-grained PAT; unauthenticated GitHub is 60 req/hr.",
     )
 
-    # ---- Email: SMTP relay (§4.6) - Brevo -----------------------------------
-    # Gmail SMTP failed almost entirely from Render's egress (0/9 in a clean
-    # test, "Network is unreachable" on every resolved address, both 587 and
-    # 465 - a network-layer block, not a bad IP). Resend's HTTP API avoided
-    # that but its no-domain sandbox only delivers to the account's own
-    # address. Brevo's relay is a single stable host and needs only
-    # single-sender verification (one address) to send to any recipient.
+    # ---- Email transport (§4.6) ---------------------------------------------
+    # Two independent SMTP providers (Gmail, then Brevo) both failed from
+    # Render on both 587 and 465 while both worked fine locally - Gmail with
+    # an instant routing error, Brevo by hanging until timeout. Different
+    # symptom, same platform, same ports: Render blocks outbound SMTP at the
+    # network level, so no destination-side fix (provider, port, IP
+    # whitelist) can help. "api" (HTTPS, port 443 - the same port Groq,
+    # GitHub and Google Calendar already use successfully from Render) is
+    # the default and what the deployed service actually uses. "smtp" is
+    # kept working and selectable for local dev / as a demonstrated
+    # fallback - only the transport changes, not the credentials or sender.
+    email_transport: str = Field("api", validation_alias="EMAIL_TRANSPORT")
+    #: Brevo's v3 API key (Settings > SMTP & API > API Keys tab) - a
+    #: DIFFERENT credential from the SMTP key below, despite both being
+    #: "Brevo credentials for the same account".
+    brevo_api_key: str = Field("", validation_alias="BREVO_API_KEY")
+
+    # ---- Email: SMTP relay (§4.6) - Brevo, "smtp" transport only ------------
     smtp_host: str = Field("smtp-relay.brevo.com", validation_alias="SMTP_HOST")
     smtp_port: int = Field(587, validation_alias="SMTP_PORT")
     #: Tried second, via implicit SSL, if the configured port is blocked.

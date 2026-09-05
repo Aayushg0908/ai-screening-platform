@@ -1,33 +1,41 @@
-"""Outbound email via SMTP (§4.6) - configured for Brevo's relay.
+"""Outbound email (§4.6) - Brevo, via either its HTTPS API or its SMTP relay.
 
-Plain smtplib, no template engine. Sends the assessment link / interview
-details only - never a candidate's score or evaluation reasoning, which is
-recruiter-facing, not candidate-facing.
+No template engine. Sends the assessment link / interview details only -
+never a candidate's score or evaluation reasoning, which is recruiter-facing,
+not candidate-facing.
 
-History, because the choice of provider here is load-bearing: Gmail SMTP
-failed from Render's egress almost entirely (0/9 in a clean test, 1/13
-overall) with "OSError: [Errno 101] Network is unreachable" on every
-resolved address, on BOTH port 587 (STARTTLS) and port 465 (implicit SSL) -
-so it isn't one bad IP or one blocked port, Render's network can't reach
-Gmail's mail infrastructure at all. Switching briefly to Resend's HTTP API
-avoided that class of problem entirely (port 443 is never blocked) but its
-sandbox mode only delivers to the account's own address without a verified
-domain - unusable for sending to arbitrary candidates. Brevo's SMTP relay
-(``smtp-relay.brevo.com``) is a single stable host, not a round-robin pool of
-frontend IPs, and needs only single-sender verification (one email address)
-rather than full domain verification to send to any recipient - the
-combination this project actually needs.
+History, because the choice of transport here is load-bearing: two
+independent SMTP providers (Gmail, then Brevo) both failed from Render on
+both submission ports (587 STARTTLS, 465 implicit SSL) while both worked
+fine from a residential connection - Gmail with an instant routing error
+("Network is unreachable" on every resolved address), Brevo by hanging until
+timeout despite its IP-authorization whitelist matching Render's documented
+egress ranges exactly. Different symptom, same platform, same ports:
+Render blocks outbound SMTP at the network level, so no destination-side fix
+(provider, port, IP whitelist) can help. Resend's HTTP API avoided that
+class of problem entirely (port 443 is never blocked) but its sandbox mode
+only delivers to the account's own address without a verified domain -
+unusable for arbitrary candidates, and domain verification wasn't an option
+here. Brevo's own HTTPS API (``api.brevo.com``) gets the best of both: the
+same account, same verified single sender, same "send to anyone" capability
+as its SMTP relay, just reached over HTTPS instead of raw SMTP sockets - the
+same port Groq, GitHub, and Google Calendar already use successfully from
+Render.
 
-``_send_via_smtp`` still resolves the host once and tries every distinct
+``EMAIL_TRANSPORT`` selects between them: ``"api"`` (default - what the
+deployed service uses) or ``"smtp"`` (kept fully working, useful locally and
+as a demonstrated fallback with zero code changes if this platform's
+restriction ever lifts). Only the transport changes; the sender identity
+(``SMTP_FROM``/``SMTP_FROM_NAME``) and Bcc behaviour are shared and identical
+either way.
+
+The ``smtp`` path still resolves the host once and tries every distinct
 address directly (keeping the real hostname for TLS SNI/certificate
 validation), and still tries an implicit-SSL port as a fallback if the
-configured port is the one being blocked. That machinery is kept
-provider-agnostic and cost nothing to keep - if 587 ever gets blocked
-somewhere, 465 is already wired in, and if Gmail becomes viable again, only
-config changes, not code, are needed. The whole hunt is capped by both an
-attempt count and a wall-clock deadline so a failed send reports back in
-seconds, not the ~82s a blind exponential-backoff retry on a single dead
-route used to take.
+configured port is the one being blocked. That machinery is provider-agnostic
+and capped by both an attempt count and a wall-clock deadline so a failed
+send reports back in seconds, not the ~82s a blind exponential-backoff retry
+on a single dead route used to take.
 """
 
 from __future__ import annotations
@@ -40,11 +48,17 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
 
+import httpx
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
 from backend.core.config import get_settings
 from backend.core.logging import get_logger
 from backend.models.tables import Candidate, JobDescription
 
 logger = get_logger(__name__)
+
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
+_API_REQUEST_TIMEOUT_SECONDS = 15.0
 
 #: Socket/connection-level errors worth trying the next address or port -
 #: never an auth failure, which will not fix itself anywhere else.
@@ -59,6 +73,12 @@ _TRANSIENT_CONNECT_ERRORS = (
 _MAX_ADDRESSES_PER_PORT = 4
 _TOTAL_DEADLINE_SECONDS = 30.0
 _CONNECT_TIMEOUT_SECONDS = 8.0
+
+
+class _BrevoServerError(RuntimeError):
+    """A 5xx from Brevo's API itself - worth a retry. A 4xx (bad key, bad
+    request, an IP-authorization rule that also applies to API calls) is
+    not - it will not change on retry."""
 
 
 def build_test_invite(
@@ -278,16 +298,12 @@ def _send_via_smtp(msg: MIMEMultipart, envelope_recipients: list[str]) -> str:
     )
 
 
-def send_email(
+def _send_via_smtp_transport(
     to: str, subject: str, text_body: str, html_body: str
 ) -> tuple[bool, str | None, str | None]:
-    """Send one email. Never raises. Returns ``(success, error, route)``.
-
-    ``route`` is the ``"host:port via ip"`` that worked, or ``None`` on
-    failure. Multipart plain+HTML (some clients block HTML). When
-    ``settings.email_bcc`` is set, that address is added to the SMTP envelope
-    recipients (so it receives a real copy) but never written into a visible
-    header - the candidate's ``To`` is the only address they see.
+    """The ``"smtp"`` transport: send via the multi-address/multi-port hunt
+    above. Never raises. Returns ``(success, error, route)`` with ``route``
+    prefixed ``"smtp:"`` so it's visible which transport handled the send.
 
     ``settings.smtp_from`` (NOT ``settings.smtp_user``) is used for both the
     envelope sender and the visible ``From`` header: with a relay like
@@ -324,10 +340,112 @@ def send_email(
 
     try:
         route = _send_via_smtp(msg, envelope_recipients)
-        return True, None, route
+        return True, None, f"smtp:{route}"
     except smtplib.SMTPAuthenticationError as exc:
         logger.error("SMTP auth failed sending to %s: %s", to, exc)
         return False, f"SMTP auth failed: {exc}", None
     except Exception as exc:  # noqa: BLE001 - a failed send must never raise
-        logger.exception("send_email failed for %s", to)
+        logger.exception("send_email (smtp) failed for %s", to)
         return False, f"{type(exc).__name__}: {exc}", None
+
+
+def _is_transient_brevo_error(exc: BaseException) -> bool:
+    """Retry a network-level hiccup reaching Brevo's API or a 5xx from Brevo
+    itself - never a 4xx, which describes a request/account problem that
+    retrying does not fix."""
+    return isinstance(exc, (httpx.TransportError, _BrevoServerError))
+
+
+@retry(
+    retry=retry_if_exception(_is_transient_brevo_error),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, max=8),
+    reraise=True,
+)
+def _post_to_brevo(payload: dict, api_key: str) -> httpx.Response:
+    resp = httpx.post(
+        BREVO_API_URL,
+        headers={"api-key": api_key, "Content-Type": "application/json"},
+        json=payload,
+        timeout=_API_REQUEST_TIMEOUT_SECONDS,
+    )
+    if resp.status_code >= 500:
+        raise _BrevoServerError(f"Brevo {resp.status_code}: {resp.text[:200]}")
+    return resp
+
+
+def _send_via_brevo_api(
+    to: str, subject: str, text_body: str, html_body: str
+) -> tuple[bool, str | None, str | None]:
+    """The ``"api"`` transport (default): send via Brevo's HTTPS API instead
+    of raw SMTP sockets - immune to a platform blocking outbound SMTP ports,
+    since it's just another HTTPS call like the ones already made to Groq,
+    GitHub, and Google Calendar. Same account, same verified sender, same
+    "send to anyone" capability as the SMTP transport - only the wire
+    protocol differs. Never raises. Returns ``(success, error, route)`` with
+    ``route`` prefixed ``"brevo-api:"``.
+
+    Note: Brevo's "Authorized IPs" setting has been observed to apply to the
+    SMTP relay; if it also gates the API and the calling IP isn't
+    authorized, Brevo returns a 401 here - visible in ``error``, not a silent
+    hang like the SMTP transport's timeout.
+    """
+    settings = get_settings()
+    if not settings.brevo_api_key:
+        return False, "Brevo API not configured (BREVO_API_KEY)", None
+    if not (settings.smtp_from and settings.smtp_from_name):
+        return False, "Sender not configured (SMTP_FROM/SMTP_FROM_NAME)", None
+
+    payload: dict = {
+        "sender": {"name": settings.smtp_from_name, "email": settings.smtp_from},
+        "to": [{"email": to}],
+        "subject": subject,
+        "htmlContent": html_body,
+        "textContent": text_body,
+    }
+    bcc = (settings.email_bcc or "").strip()
+    if bcc and bcc.lower() != to.strip().lower():
+        payload["bcc"] = [{"email": bcc}]
+
+    try:
+        resp = _post_to_brevo(payload, settings.brevo_api_key)
+    except (httpx.TransportError, _BrevoServerError) as exc:
+        logger.exception("send_email (api): Brevo unreachable for %s", to)
+        return False, f"{type(exc).__name__}: {exc}", None
+
+    if resp.status_code >= 400:
+        detail = resp.text[:300]
+        logger.error(
+            "send_email (api): Brevo rejected send to %s (%s): %s",
+            to, resp.status_code, detail,
+        )
+        return False, f"Brevo {resp.status_code}: {detail}", None
+
+    message_id = resp.json().get("messageId", "?")
+    route = f"brevo-api:{message_id}"
+    logger.info("send_email: delivered to %s via %s", to, route)
+    return True, None, route
+
+
+def send_email(
+    to: str, subject: str, text_body: str, html_body: str
+) -> tuple[bool, str | None, str | None]:
+    """Send one email via ``settings.email_transport`` (``"api"`` by
+    default, or ``"smtp"``). Never raises. Returns ``(success, error,
+    route)`` - ``route`` names which transport handled it
+    (``"brevo-api:..."`` or ``"smtp:..."``), or ``None`` on failure.
+
+    When ``settings.email_bcc`` is set, that address receives a real copy
+    (a Brevo API ``bcc`` recipient, or an SMTP envelope recipient) without
+    ever appearing in a visible header - the candidate's ``To`` is the only
+    address they see, either way.
+    """
+    settings = get_settings()
+    transport = (settings.email_transport or "api").strip().lower()
+    if transport == "smtp":
+        return _send_via_smtp_transport(to, subject, text_body, html_body)
+    if transport != "api":
+        logger.warning(
+            "send_email: unknown EMAIL_TRANSPORT %r, defaulting to 'api'", transport
+        )
+    return _send_via_brevo_api(to, subject, text_body, html_body)
