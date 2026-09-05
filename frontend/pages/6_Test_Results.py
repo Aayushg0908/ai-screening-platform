@@ -94,7 +94,26 @@ try:
 except ApiError as exc:
     st.error(f"Could not load stored results: {exc}")
 else:
-    st.dataframe(stored, width="stretch", hide_index=True)
+    # /results doesn't carry email (it's the receipt of the uploaded test
+    # file, keyed by candidate_id) - pull it from the candidate record
+    # rather than the results file's own email column, which is decorative
+    # and never joined on (see the CRITICAL JOIN RULE: s_no only).
+    try:
+        candidates_by_id = {c["candidate_id"]: c for c in client.list_candidates(batch_id=batch_id)}
+    except ApiError:
+        candidates_by_id = {}
+    stored_with_email = [
+        {
+            "s_no": r["s_no"],
+            "name": r["name"],
+            "email": candidates_by_id.get(r["candidate_id"], {}).get("email", "—"),
+            "test_la": r["test_la"],
+            "test_code": r["test_code"],
+            "status": r["status"],
+        }
+        for r in stored
+    ]
+    st.dataframe(stored_with_email, width="stretch", hide_index=True)
 
 st.divider()
 if not run_id:
